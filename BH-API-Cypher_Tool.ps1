@@ -269,6 +269,14 @@ function Invoke-BHERequest {
 
     if (-not $Silent) {
         Write-Host "  [>] $RequestMethod $Endpoint" -ForegroundColor Yellow
+        Write-Host "  [DEBUG] Full URL: $fullUrl" -ForegroundColor DarkGray
+        if ($RequestBody) {
+            $bodyPreview = if ($RequestBody.Length -gt 200) { $RequestBody.Substring(0, 200) + '...' } else { $RequestBody }
+            Write-Host "  [DEBUG] Has Body: YES ($($RequestBody.Length) chars)" -ForegroundColor DarkGray
+        }
+        else {
+            Write-Host "  [DEBUG] Has Body: NO" -ForegroundColor DarkGray
+        }
     }
 
     # Generate HMAC signature
@@ -316,6 +324,21 @@ function Invoke-BHERequest {
             catch { }
         }
 
+        # BHE returns 404 for Cypher queries that match zero results
+        $isCypherEndpoint = $Endpoint -match '/graphs/cypher'
+        if ($statusCode -eq 404 -and $isCypherEndpoint) {
+            if (-not $Silent) {
+                Write-Host "  [*] No results - the query returned zero matches." -ForegroundColor DarkYellow
+                Write-Host "      (BHE returns HTTP 404 when a Cypher query matches no data)" -ForegroundColor DarkGray
+            }
+            return @{
+                Success    = $true
+                Data       = @{ nodes = @{}; edges = @{} }
+                Endpoint   = $Endpoint
+                NoResults  = $true
+            }
+        }
+
         if (-not $Silent) {
             Write-Host "  [!] Failed - HTTP $statusCode" -ForegroundColor Red
             Write-Host "      $errorDetail" -ForegroundColor DarkRed
@@ -353,6 +376,17 @@ function Invoke-BHECypher {
         include_properties = $true
     }
     $bodyJson = $bodyObj | ConvertTo-Json -Compress
+    # Fix PowerShell Unicode-escaping characters that BHE rejects in Cypher
+    $bodyJson = $bodyJson.Replace('\u0027', "'")    # single quote
+    $bodyJson = $bodyJson.Replace('\u0026', '&')    # ampersand
+    $bodyJson = $bodyJson.Replace('\u003c', '<')    # less-than
+    $bodyJson = $bodyJson.Replace('\u003e', '>')    # greater-than
+    $bodyJson = $bodyJson.Replace('\u002b', '+')    # plus
+    $bodyJson = $bodyJson.Replace('\u0060', '`')    # backtick
+
+    if (-not $Silent) {
+        Write-Host "  [DEBUG] Body: $bodyJson" -ForegroundColor DarkGray
+    }
 
     $result = Invoke-BHERequest -BaseUrl $BaseUrl -Endpoint "/api/v2/graphs/cypher" `
         -RequestMethod "POST" -RequestBody $bodyJson -TokenId $TokenId -TokenKey $TokenKey -Silent:$Silent
@@ -378,11 +412,34 @@ function Format-APIResult {
         return
     }
 
+    # Handle Cypher queries that returned zero matches
+    if ($Result.NoResults) {
+        Write-Host ""
+        Write-Host "  -------------------------------------------------" -ForegroundColor DarkCyan
+        Write-Host "    Cypher Results: 0 nodes, 0 edges" -ForegroundColor DarkYellow
+        Write-Host "    No results match this query in your environment" -ForegroundColor DarkGray
+        Write-Host "  -------------------------------------------------" -ForegroundColor DarkCyan
+        return
+    }
+
     $data = $Result.Data
+    $isCypher = $Result.Endpoint -match '/graphs/cypher'
     Write-Host ""
 
-    # ── Handle Cypher results (nodes/edges) ──
-    if ($data.nodes -or $data.edges) {
+    # ── Debug: Always dump raw JSON structure keys ──
+    Write-Host "  [DEBUG] Response type: $($data.GetType().Name)" -ForegroundColor DarkGray
+    if ($data.PSObject -and $data.PSObject.Properties) {
+        $topKeys = @($data.PSObject.Properties | Select-Object -First 10 | ForEach-Object { $_.Name }) -join ', '
+        Write-Host "  [DEBUG] Top-level keys: $topKeys" -ForegroundColor DarkGray
+    }
+
+    # ── CYPHER RESULTS (nodes/edges graph data) ──
+    if ($isCypher) {
+        # Unwrap nested 'data' envelope: { "data": { "nodes": {...}, "edges": {...} } }
+        if ($data.data -and ($data.data.PSObject.Properties.Name -contains 'nodes' -or $data.data.PSObject.Properties.Name -contains 'edges')) {
+            Write-Host "  [DEBUG] Unwrapping nested data.data envelope" -ForegroundColor DarkGray
+            $data = $data.data
+        }
         $nodeCount = 0
         $edgeCount = 0
 
@@ -514,10 +571,16 @@ function Format-APIResult {
     # ── Handle standard API responses (arrays/objects) ──
     else {
         $items = $null
-        if ($data.data) { $items = $data.data }
-        elseif ($data -is [System.Array]) { $items = $data }
 
-        if ($items) {
+        # Check if data.data is an array of items (standard API response)
+        if ($data.data -and $data.data -is [System.Array]) {
+            $items = $data.data
+        }
+        elseif ($data -is [System.Array]) {
+            $items = $data
+        }
+
+        if ($items -and $items.Count -gt 0) {
             $itemCount = $items.Count
             Write-Host "  -------------------------------------------------" -ForegroundColor DarkCyan
             Write-Host "    API Results: $itemCount items" -ForegroundColor Cyan
@@ -525,48 +588,47 @@ function Format-APIResult {
             Write-Host ""
 
             # Auto-detect columns from first item
-            if ($items.Count -gt 0) {
-                $sampleProps = @($items[0].PSObject.Properties | Select-Object -First 6)
-                $displayObjects = @()
+            $sampleProps = @($items[0].PSObject.Properties | Select-Object -First 6)
+            $displayObjects = @()
 
-                $counter = 0
-                foreach ($item in $items) {
-                    $counter++
-                    if ($counter -gt 100) {
-                        $truncMsg = '  ... {0} total, showing first 100' -f $itemCount
-                        Write-Host $truncMsg -ForegroundColor DarkGray
-                        break
-                    }
-
-                    $obj = [ordered]@{ '#' = $counter }
-                    foreach ($prop in $sampleProps) {
-                        $val = $item.($prop.Name)
-                        if ($val -is [System.Collections.ICollection]) {
-                            $val = ($val | ForEach-Object { $_.ToString() }) -join ", "
-                        }
-                        $obj[$prop.Name] = $val
-                    }
-                    $displayObjects += [PSCustomObject]$obj
+            $counter = 0
+            foreach ($item in $items) {
+                $counter++
+                if ($counter -gt 100) {
+                    $truncMsg = '  ... {0} total, showing first 100' -f $itemCount
+                    Write-Host $truncMsg -ForegroundColor DarkGray
+                    break
                 }
 
-                # Table display
-                $displayObjects | Format-Table -AutoSize -Wrap | Out-String | Write-Host
-
-                if ($ExportPath) {
-                    Export-Results -Objects $displayObjects -Path $ExportPath
+                $obj = [ordered]@{ '#' = $counter }
+                foreach ($prop in $sampleProps) {
+                    $val = $item.($prop.Name)
+                    if ($val -is [System.Collections.ICollection]) {
+                        $val = ($val | ForEach-Object { $_.ToString() }) -join ", "
+                    }
+                    $obj[$prop.Name] = $val
                 }
+                $displayObjects += [PSCustomObject]$obj
+            }
+
+            # Table display
+            $displayObjects | Format-Table -AutoSize -Wrap | Out-String | Write-Host
+
+            if ($ExportPath) {
+                Export-Results -Objects $displayObjects -Path $ExportPath
             }
         }
         else {
-            # Single object / raw response
+            # Single object / raw response - dump as JSON
             Write-Host "  -------------------------------------------------" -ForegroundColor DarkCyan
-            Write-Host "    API Response" -ForegroundColor Cyan
+            Write-Host "    API Response (Raw JSON)" -ForegroundColor Cyan
             Write-Host "  -------------------------------------------------" -ForegroundColor DarkCyan
             Write-Host ""
-            $data | ConvertTo-Json -Depth 5 | Write-Host -ForegroundColor White
+            $jsonOut = $data | ConvertTo-Json -Depth 10
+            Write-Host $jsonOut -ForegroundColor White
 
             if ($ExportPath) {
-                $data | ConvertTo-Json -Depth 5 | Out-File -FilePath $ExportPath -Encoding UTF8
+                $jsonOut | Out-File -FilePath $ExportPath -Encoding UTF8
                 Write-Host ""
                 Write-Host "  [+] JSON exported to: $ExportPath" -ForegroundColor Green
             }
@@ -594,166 +656,853 @@ function Export-Results {
 }
 
 # ============================================================================
-# BUILT-IN QUERY LIBRARY
+# CYPHER QUERY LIBRARY (from queries.specterops.io)
 # ============================================================================
-function Get-QueryLibrary {
+function Get-CypherLibrary {
+    # Queries sourced from the official BloodHound Query Library
+    # https://queries.specterops.io/
+    # https://github.com/SpecterOps/BloodHoundQueryLibrary
+    #
+    # NOTE: BHE /api/v2/graphs/cypher returns graph data (nodes/edges).
+    # All queries use simple RETURN n/p patterns. Complex RETURN with
+    # property aliases (AS) and aggregation (COUNT) are not supported.
     return @(
+        # ── Tier Zero ──
         @{
             Category    = "Tier Zero"
-            Name        = "All Tier Zero Objects"
-            Description = "List all Tier Zero / High Value assets"
-            Type        = "Cypher"
-            Query       = "MATCH (n) WHERE n.system_tags CONTAINS 'admin_tier_0' RETURN n"
-        },
-        @{
-            Category    = "Tier Zero"
-            Name        = "Tier Zero Users"
-            Description = "List Tier Zero user accounts"
-            Type        = "Cypher"
-            Query       = "MATCH (n:User) WHERE n.system_tags CONTAINS 'admin_tier_0' RETURN n"
+            Name        = "Kerberoastable Tier Zero Members"
+            Description = "Kerberoastable members of Tier Zero / High Value groups"
+            Query       = "MATCH (u:User) WHERE ((u:Tag_Tier_Zero) OR COALESCE(u.system_tags, '') CONTAINS 'admin_tier_0') AND u.hasspn=true AND u.enabled = true AND NOT u.objectid ENDS WITH '-502' AND NOT COALESCE(u.gmsa, false) = true AND NOT COALESCE(u.msa, false) = true RETURN u LIMIT 100"
         },
         @{
             Category    = "Tier Zero"
-            Name        = "Tier Zero Groups"
-            Description = "List Tier Zero groups"
-            Type        = "Cypher"
-            Query       = "MATCH (n:Group) WHERE n.system_tags CONTAINS 'admin_tier_0' RETURN n"
+            Name        = "Tier Zero Users with Email"
+            Description = "Tier Zero accounts with email access"
+            Query       = "MATCH (n) WHERE ((n:Tag_Tier_Zero) OR COALESCE(n.system_tags, '') CONTAINS 'admin_tier_0') AND n.email <> '' AND n.enabled = true AND NOT toUpper(n.email) ENDS WITH '.ONMICROSOFT.COM' RETURN n"
         },
         @{
             Category    = "Tier Zero"
-            Name        = "Tier Zero Computers"
-            Description = "List Tier Zero computers (DCs, etc.)"
-            Type        = "Cypher"
-            Query       = "MATCH (n:Computer) WHERE n.system_tags CONTAINS 'admin_tier_0' RETURN n"
+            Name        = "Foreign Principals in Tier Zero"
+            Description = "Foreign service principals in T0 targets"
+            Query       = "MATCH (n:AZServicePrincipal) WHERE ((n:Tag_Tier_Zero) OR COALESCE(n.system_tags, '') CONTAINS 'admin_tier_0') AND NOT toUpper(n.appownerorganizationid) = toUpper(n.tenantid) AND n.appownerorganizationid CONTAINS '-' RETURN n LIMIT 100"
         },
         @{
-            Category    = "Users"
-            Name        = "Enabled Users (Sample)"
-            Description = "First 25 enabled user accounts"
-            Type        = "Cypher"
-            Query       = "MATCH (u:User {enabled:true}) RETURN u LIMIT 25"
+            Category    = "Tier Zero"
+            Name        = "All Tier Zero Assets"
+            Description = "All assets tagged as Tier Zero"
+            Query       = "MATCH (n:Tag_Tier_Zero) RETURN n LIMIT 200"
         },
         @{
-            Category    = "Users"
-            Name        = "Kerberoastable Users"
-            Description = "Users with SPNs set (Kerberoastable)"
-            Type        = "Cypher"
-            Query       = "MATCH (u:User {enabled:true, hasspn:true}) RETURN u"
+            Category    = "Tier Zero"
+            Name        = "Constrained Delegation to Tier Zero"
+            Description = "Non-T0 with constrained delegation to T0"
+            Query       = "MATCH p=(n)-[:AllowedToDelegate]->(t:Tag_Tier_Zero) WHERE NOT ((n:Tag_Tier_Zero) OR COALESCE(n.system_tags, '') CONTAINS 'admin_tier_0') RETURN p LIMIT 100"
+        },
+
+        # ── Shortest Paths ──
+        @{
+            Category    = "Shortest Paths"
+            Name        = "Domain Users to Tier Zero"
+            Description = "Shortest path from Domain Users to any T0 asset"
+            Query       = "MATCH p=shortestPath((g:Group)-[:Owns|GenericAll|GenericWrite|WriteOwner|WriteDacl|MemberOf|ForceChangePassword|AllExtendedRights|AddMember|HasSession|GPLink|AllowedToDelegate|CoerceToTGT|AllowedToAct|AdminTo|CanPSRemote|CanRDP|ExecuteDCOM|HasSIDHistory|AddSelf|DCSync|ReadLAPSPassword|ReadGMSAPassword|DumpSMSAPassword|SQLAdmin|AddAllowedToAct|WriteSPN|AddKeyCredentialLink|SyncLAPSPassword|WriteAccountRestrictions|WriteGPLink|GoldenCert|ADCSESC1|ADCSESC3|ADCSESC4|ADCSESC6a|ADCSESC6b|ADCSESC9a|ADCSESC9b|ADCSESC10a|ADCSESC10b|ADCSESC13|SyncedToEntraUser|CoerceAndRelayNTLMToSMB|CoerceAndRelayNTLMToADCS*1..]->(t:Tag_Tier_Zero)) WHERE g.objectid ENDS WITH '-513' AND g<>t RETURN p LIMIT 50"
         },
         @{
-            Category    = "Users"
-            Name        = "AS-REP Roastable Users"
-            Description = "Users that don't require Kerberos preauth"
-            Type        = "Cypher"
-            Query       = "MATCH (u:User {enabled:true, dontreqpreauth:true}) RETURN u"
+            Category    = "Shortest Paths"
+            Name        = "Owned Principals to Any Target"
+            Description = "Attack paths from owned/compromised principals"
+            Query       = "MATCH p=shortestPath((n {owned:true})-[*1..]->(t)) WHERE n<>t AND NOT t:Tag_Tier_Zero RETURN p LIMIT 50"
         },
         @{
-            Category    = "Users"
-            Name        = "Unconstrained Delegation Users"
-            Description = "Users trusted for unconstrained delegation"
-            Type        = "Cypher"
-            Query       = "MATCH (u:User {enabled:true, unconstraineddelegation:true}) RETURN u"
+            Category    = "Shortest Paths"
+            Name        = "Owned Principals to Tier Zero"
+            Description = "Attack paths from owned principals to T0"
+            Query       = "MATCH p=shortestPath((n {owned:true})-[*1..]->(t:Tag_Tier_Zero)) WHERE n<>t RETURN p LIMIT 50"
         },
+
+        # ── Dangerous Privileges ──
         @{
-            Category    = "Computers"
+            Category    = "Dangerous Privileges"
             Name        = "Unconstrained Delegation Computers"
-            Description = "Computers trusted for unconstrained delegation (non-DCs)"
-            Type        = "Cypher"
-            Query       = "MATCH (c:Computer {unconstraineddelegation:true}) WHERE NOT c.system_tags CONTAINS 'admin_tier_0' RETURN c"
+            Description = "Computers with unconstrained delegation (excl DCs)"
+            Query       = "MATCH (c:Computer {unconstraineddelegation:true}) WHERE NOT c.objectid ENDS WITH '-502' AND NOT c.distinguishedname CONTAINS 'OU=Domain Controllers' RETURN c"
         },
         @{
-            Category    = "Computers"
-            Name        = "Domain Controllers"
-            Description = "All Domain Controller computers"
-            Type        = "Cypher"
-            Query       = "MATCH (c:Computer) WHERE c.system_tags CONTAINS 'admin_tier_0' AND c.operatingsystem CONTAINS 'Server' RETURN c"
+            Category    = "Dangerous Privileges"
+            Name        = "DA Sessions on Non-DC Computers"
+            Description = "Non-DC systems where DAs have sessions"
+            Query       = "MATCH p=(c:Computer)-[:HasSession]->(u:User)-[:MemberOf*1..]->(g:Group) WHERE g.objectid ENDS WITH '-512' AND NOT c.distinguishedname CONTAINS 'OU=Domain Controllers' RETURN p LIMIT 100"
         },
         @{
-            Category    = "Attack Paths"
-            Name        = "Shortest Path to Domain Admins"
-            Description = "Shortest paths from non-T0 to Domain Admins"
-            Type        = "Cypher"
-            Query       = "MATCH p=shortestPath((u:User {enabled:true})-[*1..]->(g:Group)) WHERE g.name STARTS WITH 'DOMAIN ADMINS@' AND NOT u.system_tags CONTAINS 'admin_tier_0' RETURN p LIMIT 10"
+            Category    = "Dangerous Privileges"
+            Name        = "Foreign Group Membership"
+            Description = "Users in groups from other domains"
+            Query       = "MATCH p=(u:User)-[:MemberOf]->(g:Group) WHERE u.domainsid <> g.domainsid RETURN p LIMIT 100"
         },
         @{
-            Category    = "Attack Paths"
-            Name        = "Users with DCSync Rights"
-            Description = "Non-T0 principals with DCSync capabilities"
-            Type        = "Cypher"
-            Query       = "MATCH p=(n)-[:DCSync|GetChanges|GetChangesAll|GetChangesInFilteredSet]->(d:Domain) WHERE NOT n.system_tags CONTAINS 'admin_tier_0' RETURN p"
+            Category    = "Dangerous Privileges"
+            Name        = "Exchange Privilege Escalation"
+            Description = "WriteDACL on domains via Exchange groups"
+            Query       = "MATCH p=(g:Group)-[:WriteDacl]->(d:Domain) WHERE g.name CONTAINS 'EXCHANGE' RETURN p"
         },
         @{
-            Category    = "Sessions"
-            Name        = "Active Sessions (Sample)"
-            Description = "Recent session relationships"
-            Type        = "Cypher"
-            Query       = "MATCH p=(c:Computer)-[:HasSession]->(u:User) RETURN p LIMIT 25"
+            Category    = "Dangerous Privileges"
+            Name        = "SID History Abuse"
+            Description = "Objects with SID History set"
+            Query       = "MATCH (n) WHERE n.sidhistory IS NOT NULL AND SIZE(n.sidhistory) > 0 RETURN n LIMIT 100"
         },
         @{
-            Category    = "API Endpoints"
-            Name        = "Available Domains"
-            Description = "List all domains collected in BHE"
-            Type        = "API"
-            Endpoint    = "/api/v2/available-domains"
-            HttpMethod  = "GET"
+            Category    = "Dangerous Privileges"
+            Name        = "OU Controllers"
+            Description = "Non-admin principals controlling OUs"
+            Query       = "MATCH p=(n)-[:Owns|GenericAll|GenericWrite|WriteOwner|WriteDacl]->(ou:OU) WHERE NOT ((n:Tag_Tier_Zero) OR COALESCE(n.system_tags, '') CONTAINS 'admin_tier_0') RETURN p LIMIT 100"
         },
         @{
-            Category    = "API Endpoints"
-            Name        = "API Version"
-            Description = "Check BHE API version"
-            Type        = "API"
-            Endpoint    = "/api/version"
-            HttpMethod  = "GET"
+            Category    = "Dangerous Privileges"
+            Name        = "LAPS Password Readers"
+            Description = "Non-admin principals reading LAPS passwords"
+            Query       = "MATCH p=(n)-[:ReadLAPSPassword]->(c:Computer) WHERE NOT ((n:Tag_Tier_Zero) OR COALESCE(n.system_tags, '') CONTAINS 'admin_tier_0') RETURN p LIMIT 100"
         },
         @{
-            Category    = "API Endpoints"
-            Name        = "Self (Whoami)"
-            Description = "Show current authenticated user info"
-            Type        = "API"
-            Endpoint    = "/api/v2/self"
-            HttpMethod  = "GET"
+            Category    = "Dangerous Privileges"
+            Name        = "GPO Control Over T0 Assets"
+            Description = "Non-admin GPO control over T0 assets"
+            Query       = "MATCH p=(n)-[:GenericAll|GenericWrite|WriteOwner|WriteDacl|Owns]->(g:GPO)-[:GPLink]->(ou:OU)-[:Contains*1..]->(t:Tag_Tier_Zero) WHERE NOT ((n:Tag_Tier_Zero) OR COALESCE(n.system_tags, '') CONTAINS 'admin_tier_0') RETURN p LIMIT 100"
         },
         @{
-            Category    = "API Endpoints"
-            Name        = "Asset Groups"
-            Description = "List all asset groups"
-            Type        = "API"
-            Endpoint    = "/api/v2/asset-groups"
-            HttpMethod  = "GET"
+            Category    = "Dangerous Privileges"
+            Name        = "BadSuccessor Principals"
+            Description = "Principals with dangerous successor relationships"
+            Query       = "MATCH p=(n)-[:BadSuccessor]->(m) RETURN p LIMIT 100"
+        },
+
+        # ── AD Hygiene ──
+        @{
+            Category    = "AD Hygiene"
+            Name        = "Reversible Encryption Users"
+            Description = "Users with reversible encryption"
+            Query       = "MATCH (u:User {enabled:true}) WHERE u.useraccountcontrol IS NOT NULL AND (toInteger(u.useraccountcontrol) % 256) >= 128 RETURN u LIMIT 100"
         },
         @{
-            Category    = "API Endpoints"
-            Name        = "Audit Logs"
-            Description = "View recent audit log entries"
-            Type        = "API"
-            Endpoint    = "/api/v2/audit"
-            HttpMethod  = "GET"
+            Category    = "AD Hygiene"
+            Name        = "PASSWD_NOTREQD Users"
+            Description = "Active users with PASSWD_NOTREQD flag"
+            Query       = "MATCH (u:User {enabled:true, passwordnotreqd:true}) RETURN u LIMIT 100"
         },
         @{
-            Category    = "API Endpoints"
-            Name        = "Data Posture Stats"
-            Description = "Overall posture statistics"
-            Type        = "API"
-            Endpoint    = "/api/v2/posture-stats"
-            HttpMethod  = "GET"
+            Category    = "AD Hygiene"
+            Name        = "DES-Only Encryption Users"
+            Description = "Users configured for DES-only encryption"
+            Query       = "MATCH (u:User {enabled:true}) WHERE u.useraccountcontrol IS NOT NULL AND toInteger(u.useraccountcontrol) >= 2097152 RETURN u LIMIT 100"
         },
         @{
-            Category    = "API Endpoints"
-            Name        = "List Clients (Collectors)"
-            Description = "Show registered SharpHound/AzureHound clients"
-            Type        = "API"
-            Endpoint    = "/api/v2/clients"
-            HttpMethod  = "GET"
+            Category    = "AD Hygiene"
+            Name        = "AdminCount Orphans"
+            Description = "adminCount=1 but not in privileged groups"
+            Query       = "MATCH (u:User {admincount:true, enabled:true}) WHERE NOT ((u:Tag_Tier_Zero) OR COALESCE(u.system_tags, '') CONTAINS 'admin_tier_0') AND NOT (u)-[:MemberOf*1..]->(:Group:Tag_Tier_Zero) RETURN u LIMIT 100"
         },
         @{
-            Category    = "API Endpoints"
-            Name        = "File Upload Jobs"
-            Description = "List recent file upload jobs"
-            Type        = "API"
-            Endpoint    = "/api/v2/file-upload"
-            HttpMethod  = "GET"
+            Category    = "AD Hygiene"
+            Name        = "Computers Without LAPS"
+            Description = "Active computers missing LAPS"
+            Query       = "MATCH (c:Computer {enabled:true}) WHERE c.haslaps = false RETURN c LIMIT 200"
+        },
+        @{
+            Category    = "AD Hygiene"
+            Name        = "Enabled Guest Accounts"
+            Description = "Guest accounts that are enabled"
+            Query       = "MATCH (u:User {enabled:true}) WHERE u.objectid ENDS WITH '-501' RETURN u"
+        },
+        @{
+            Category    = "AD Hygiene"
+            Name        = "Active Built-in Admin (RID-500)"
+            Description = "Enabled built-in Administrator accounts"
+            Query       = "MATCH (u:User {enabled:true}) WHERE u.objectid ENDS WITH '-500' RETURN u"
+        },
+        @{
+            Category    = "AD Hygiene"
+            Name        = "Pre-Windows 2000 Group Members"
+            Description = "Pre-Windows 2000 Compatible Access membership"
+            Query       = "MATCH p=(m)-[:MemberOf*1..]->(g:Group) WHERE g.objectid ENDS WITH '-554' RETURN p LIMIT 100"
+        },
+        @{
+            Category    = "AD Hygiene"
+            Name        = "Circular Group Memberships"
+            Description = "Groups with circular nesting"
+            Query       = "MATCH p=(g:Group)-[:MemberOf*2..]->(g2:Group) WHERE g.objectid = g2.objectid RETURN p LIMIT 50"
+        },
+        @{
+            Category    = "AD Hygiene"
+            Name        = "Orphaned SID in ACLs"
+            Description = "ACEs referencing deleted/orphaned SIDs"
+            Query       = "MATCH p=()-[r:Owns|GenericAll|GenericWrite|WriteOwner|WriteDacl]->() WHERE NOT EXISTS(startNode(r).name) RETURN p LIMIT 50"
+        },
+
+        # ── ADCS ──
+        @{
+            Category    = "ADCS"
+            Name        = "CA Admins (Non-T0)"
+            Description = "Non-T0 principals managing CAs"
+            Query       = "MATCH p=(n)-[:ManageCA|ManageCertificates]->(ca) WHERE NOT ((n:Tag_Tier_Zero) OR COALESCE(n.system_tags, '') CONTAINS 'admin_tier_0') RETURN p LIMIT 100"
+        },
+        @{
+            Category    = "ADCS"
+            Name        = "ESC1 Vulnerable Templates"
+            Description = "Templates vulnerable to ESC1"
+            Query       = "MATCH p=()-[:ADCSESC1]->() RETURN p LIMIT 100"
+        },
+        @{
+            Category    = "ADCS"
+            Name        = "ESC8 (HTTP Enrollment)"
+            Description = "CAs with HTTP enrollment (NTLM relay)"
+            Query       = "MATCH p=()-[:CoerceAndRelayNTLMToADCS]->() RETURN p LIMIT 100"
+        },
+        @{
+            Category    = "ADCS"
+            Name        = "Weak Certificate Binding"
+            Description = "Templates with weak cert binding"
+            Query       = "MATCH (ct:CertTemplate) WHERE ct.strongcertificatebindingenforcementraw IS NOT NULL AND ct.strongcertificatebindingenforcementraw < 2 RETURN ct"
+        },
+        @{
+            Category    = "ADCS"
+            Name        = "Templates Missing Security Extension"
+            Description = "No szOID_NTDS_CA_SECURITY_EXT"
+            Query       = "MATCH (ct:CertTemplate) WHERE ct.nosecurityextension = true RETURN ct"
+        },
+        @{
+            Category    = "ADCS"
+            Name        = "Enrollment Agent Templates"
+            Description = "Templates with enrollment agent capability"
+            Query       = "MATCH (ct:CertTemplate) WHERE ct.enrollmentagent = true RETURN ct"
+        },
+
+        # ── NTLM Relay ──
+        @{
+            Category    = "NTLM Relay"
+            Name        = "All Coerce/Relay Edges"
+            Description = "All NTLM coercion/relay attack paths"
+            Query       = "MATCH p=()-[:CoerceAndRelayNTLMToSMB|CoerceAndRelayNTLMToADCS|CoerceAndRelayNTLMToLDAP|CoerceAndRelayNTLMToLDAPS]->() RETURN p LIMIT 100"
+        },
+        @{
+            Category    = "NTLM Relay"
+            Name        = "T0 Users NOT in Protected Users"
+            Description = "T0 users missing Protected Users group"
+            Query       = "MATCH (u:User) WHERE ((u:Tag_Tier_Zero) OR COALESCE(u.system_tags, '') CONTAINS 'admin_tier_0') AND u.enabled = true AND NOT (u)-[:MemberOf*1..]->(:Group {name:'PROTECTED USERS@' + toUpper(SPLIT(u.name, '@')[1])}) RETURN u LIMIT 100"
+        },
+
+        # ── Cross Platform ──
+        @{
+            Category    = "Cross Platform"
+            Name        = "Synced User Ownership"
+            Description = "On-prem synced to Entra with ownership"
+            Query       = "MATCH p=(u:User)-[:SyncedToEntraUser]->(au:AZUser)-[:Owns|GenericAll|GenericWrite]->(t) RETURN p LIMIT 100"
+        },
+        @{
+            Category    = "Cross Platform"
+            Name        = "Entra ID Role Assignments"
+            Description = "Principals with Entra directory roles"
+            Query       = "MATCH p=(n)-[:AZHasRole|AZMemberOf*1..]->(r:AZRole) RETURN p LIMIT 100"
+        },
+        @{
+            Category    = "Cross Platform"
+            Name        = "Azure RM Permissions"
+            Description = "Principals with Azure RM role assignments"
+            Query       = "MATCH p=(n)-[:AZOwner|AZContributor|AZUserAccessAdministrator]->(t) RETURN p LIMIT 100"
+        },
+        @{
+            Category    = "Cross Platform"
+            Name        = "SSO Key Rotation Check"
+            Description = "Domains with SSO key rotation data"
+            Query       = "MATCH (d:Domain) WHERE d.lastssokeyrotation IS NOT NULL RETURN d"
+        },
+
+        # ── Domain Info ──
+        @{
+            Category    = "Domain Info"
+            Name        = "Domain Trusts"
+            Description = "All trust relationships"
+            Query       = "MATCH p=(d1:Domain)-[:TrustedBy|SameForestTrust]->(d2:Domain) RETURN p"
+        },
+        @{
+            Category    = "Domain Info"
+            Name        = "All OUs"
+            Description = "All Organizational Units"
+            Query       = "MATCH (ou:OU) RETURN ou LIMIT 200"
+        },
+        @{
+            Category    = "Domain Info"
+            Name        = "Schema Admins"
+            Description = "Members of Schema Admins"
+            Query       = "MATCH p=(u)-[:MemberOf*1..]->(g:Group) WHERE g.objectid ENDS WITH '-518' RETURN p"
+        },
+        @{
+            Category    = "Domain Info"
+            Name        = "Account/Server Operators"
+            Description = "Members of operator groups"
+            Query       = "MATCH p=(u)-[:MemberOf*1..]->(g:Group) WHERE g.objectid ENDS WITH '-548' OR g.objectid ENDS WITH '-549' RETURN p LIMIT 100"
+        },
+        @{
+            Category    = "Domain Info"
+            Name        = "Cross-Trust ACE Grants"
+            Description = "ACE access across trust boundaries"
+            Query       = "MATCH p=(n)-[:Owns|GenericAll|GenericWrite|WriteOwner|WriteDacl]->(t) WHERE n.domainsid <> t.domainsid RETURN p LIMIT 100"
+        },
+        @{
+            Category    = "Domain Info"
+            Name        = "Computers Without LAPS (All)"
+            Description = "All enabled computers missing LAPS"
+            Query       = "MATCH (c:Computer {enabled:true}) WHERE c.haslaps = false RETURN c LIMIT 200"
+        },
+
+        # ── Azure ──
+        @{
+            Category    = "Azure"
+            Name        = "Foreign Service Principals"
+            Description = "Service principals from external tenants"
+            Query       = "MATCH (sp:AZServicePrincipal) WHERE NOT toUpper(sp.appownerorganizationid) = toUpper(sp.tenantid) AND sp.appownerorganizationid CONTAINS '-' RETURN sp LIMIT 100"
+        },
+        @{
+            Category    = "Azure"
+            Name        = "MS Graph Role Assignments"
+            Description = "SPs with dangerous MS Graph roles"
+            Query       = "MATCH p=(sp:AZServicePrincipal)-[:AZMGAppRoleAssignment_ReadWrite_All|AZMGApplication_ReadWrite_All|AZMGDirectory_ReadWrite_All|AZMGRoleManagement_ReadWrite_Directory|AZMGServicePrincipalEndpoint_ReadWrite_All]->(t) RETURN p LIMIT 100"
+        },
+        @{
+            Category    = "Azure"
+            Name        = "Circular AZ Group Memberships"
+            Description = "Circular group nesting in Entra ID"
+            Query       = "MATCH p=(x:AZGroup)-[:AZMemberOf*2..]->(y:AZGroup) WHERE x.objectid=y.objectid RETURN p LIMIT 100"
+        },
+
+        # ── Test Queries (Should Always Return Results) ──
+        @{
+            Category    = "Test Queries"
+            Name        = "Any 5 Nodes"
+            Description = "Return any 5 nodes (basic connectivity test)"
+            Query       = "MATCH (n) RETURN n LIMIT 5"
+        },
+        @{
+            Category    = "Test Queries"
+            Name        = "All Domains"
+            Description = "All domain objects in the database"
+            Query       = "MATCH (d:Domain) RETURN d"
+        },
+        @{
+            Category    = "Test Queries"
+            Name        = "All Domain Controllers"
+            Description = "All DC computers and their domains"
+            Query       = "MATCH p=(c:Computer)-[:DCFor]->(d:Domain) RETURN p"
+        },
+        @{
+            Category    = "Test Queries"
+            Name        = "First 10 Enabled Users"
+            Description = "Sample of enabled user accounts"
+            Query       = "MATCH (u:User {enabled:true}) RETURN u LIMIT 10"
+        },
+        @{
+            Category    = "Test Queries"
+            Name        = "First 10 Computers"
+            Description = "Sample of computer objects"
+            Query       = "MATCH (c:Computer) RETURN c LIMIT 10"
+        },
+        @{
+            Category    = "Test Queries"
+            Name        = "First 10 Groups"
+            Description = "Sample of group objects"
+            Query       = "MATCH (g:Group) RETURN g LIMIT 10"
+        },
+        @{
+            Category    = "Test Queries"
+            Name        = "Domain Admins Members"
+            Description = "Direct and nested Domain Admins members"
+            Query       = "MATCH p=(u)-[:MemberOf*1..]->(g:Group) WHERE g.objectid ENDS WITH '-512' RETURN p"
+        },
+        @{
+            Category    = "Test Queries"
+            Name        = "Enterprise Admins Members"
+            Description = "Direct and nested Enterprise Admins members"
+            Query       = "MATCH p=(u)-[:MemberOf*1..]->(g:Group) WHERE g.objectid ENDS WITH '-519' RETURN p"
+        },
+        @{
+            Category    = "Test Queries"
+            Name        = "All GPOs"
+            Description = "All Group Policy Objects"
+            Query       = "MATCH (g:GPO) RETURN g LIMIT 50"
+        },
+        @{
+            Category    = "Test Queries"
+            Name        = "Kerberoastable Users"
+            Description = "All users with SPN set"
+            Query       = "MATCH (u:User {hasspn:true, enabled:true}) RETURN u LIMIT 50"
+        },
+        @{
+            Category    = "Test Queries"
+            Name        = "Computers with Sessions"
+            Description = "Computers that have active sessions"
+            Query       = "MATCH p=(c:Computer)-[:HasSession]->(u:User) RETURN p LIMIT 20"
+        },
+        @{
+            Category    = "Test Queries"
+            Name        = "All OUs"
+            Description = "All Organizational Units"
+            Query       = "MATCH (ou:OU) RETURN ou LIMIT 50"
+        },
+        @{
+            Category    = "Test Queries"
+            Name        = "All Domain Trusts"
+            Description = "All trust relationships (any type)"
+            Query       = "MATCH p=(d1:Domain)-[r]->(d2:Domain) RETURN p"
+        },
+        @{
+            Category    = "Test Queries"
+            Name        = "AdminTo Relationships"
+            Description = "All local admin rights"
+            Query       = "MATCH p=(n)-[:AdminTo]->(c:Computer) RETURN p LIMIT 30"
+        },
+        @{
+            Category    = "Test Queries"
+            Name        = "Users with Local Admin"
+            Description = "Users with direct local admin rights"
+            Query       = "MATCH p=(u:User)-[:AdminTo]->(c:Computer) RETURN p LIMIT 30"
+        },
+        @{
+            Category    = "Test Queries"
+            Name        = "All Certificate Authorities"
+            Description = "Enterprise, Root, and AIA CAs"
+            Query       = "MATCH (ca) WHERE ca:EnterpriseCA OR ca:RootCA OR ca:AIACA RETURN ca"
+        },
+        @{
+            Category    = "Test Queries"
+            Name        = "All Tier Zero Assets"
+            Description = "Everything tagged as Tier Zero"
+            Query       = "MATCH (n:Tag_Tier_Zero) RETURN n LIMIT 100"
+        },
+        @{
+            Category    = "Test Queries"
+            Name        = "All Cert Templates"
+            Description = "All certificate templates"
+            Query       = "MATCH (ct:CertTemplate) RETURN ct LIMIT 50"
+        },
+        @{
+            Category    = "Test Queries"
+            Name        = "MemberOf Edges (Sample)"
+            Description = "Sample of group membership relationships"
+            Query       = "MATCH p=(n)-[:MemberOf]->(g:Group) RETURN p LIMIT 20"
+        },
+        @{
+            Category    = "Test Queries"
+            Name        = "HasSession Edges (Sample)"
+            Description = "Sample of session relationships"
+            Query       = "MATCH p=(c:Computer)-[:HasSession]->(u:User) RETURN p LIMIT 20"
         }
     )
+}
+
+function Get-APILibrary {
+    # All non-deprecated GET endpoints from the BloodHound API Reference
+    # https://bloodhound.specterops.io/reference/overview
+    # Endpoints with {param} will prompt for input at runtime
+    return @(
+        # ── Auth ──
+        @{ Category = "Auth"; Name = "Self (Whoami)"; Description = "Current authenticated user"; Endpoint = "/api/v2/self" },
+        @{ Category = "Auth"; Name = "SAML Providers"; Description = "Configured SAML providers"; Endpoint = "/api/v2/saml" },
+        @{ Category = "Auth"; Name = "All SAML Sign-On Endpoints"; Description = "SAML SSO endpoint URLs"; Endpoint = "/api/v2/saml/sso" },
+        @{ Category = "Auth"; Name = "SAML Provider"; Description = "Specific SAML provider details"; Endpoint = "/api/v2/saml/providers/{saml_provider_id}" },
+        @{ Category = "Auth"; Name = "SSO Providers"; Description = "All SSO providers"; Endpoint = "/api/v2/sso/providers" },
+        @{ Category = "Auth"; Name = "SAML Signing Certificate"; Description = "SAML signing certificate"; Endpoint = "/api/v2/saml/providers/{saml_provider_id}/signing-certificate" },
+
+        # ── Permissions ──
+        @{ Category = "Permissions"; Name = "Permissions"; Description = "All BHE permissions"; Endpoint = "/api/v2/permissions" },
+        @{ Category = "Permissions"; Name = "Permission"; Description = "Specific permission details"; Endpoint = "/api/v2/permissions/{permission_id}" },
+
+        # ── Roles ──
+        @{ Category = "Roles"; Name = "Roles"; Description = "All BHE user roles"; Endpoint = "/api/v2/roles" },
+        @{ Category = "Roles"; Name = "Role"; Description = "Specific role details"; Endpoint = "/api/v2/roles/{role_id}" },
+
+        # ── API Tokens ──
+        @{ Category = "API Tokens"; Name = "Auth Tokens"; Description = "All API tokens"; Endpoint = "/api/v2/tokens" },
+
+        # ── BloodHound Users ──
+        @{ Category = "BloodHound Users"; Name = "Users"; Description = "All BHE user accounts"; Endpoint = "/api/v2/bloodhound-users" },
+        @{ Category = "BloodHound Users"; Name = "User"; Description = "Specific BHE user details"; Endpoint = "/api/v2/bloodhound-users/{user_id}" },
+        @{ Category = "BloodHound Users"; Name = "User MFA Status"; Description = "MFA activation status"; Endpoint = "/api/v2/bloodhound-users/{user_id}/mfa-activation" },
+
+        # ── Collectors ──
+        @{ Category = "Collectors"; Name = "SharpHound Manifest"; Description = "SharpHound version manifest"; Endpoint = "/api/v2/collectors/sharphound" },
+        @{ Category = "Collectors"; Name = "AzureHound Manifest"; Description = "AzureHound version manifest"; Endpoint = "/api/v2/collectors/azurehound" },
+        @{ Category = "Collectors"; Name = "Kennel Enterprise Manifest"; Description = "Kennel Enterprise agent manifest"; Endpoint = "/api/v2/collectors/kennel-enterprise" },
+        @{ Category = "Collectors"; Name = "Kennel Manifest"; Description = "Kennel agent manifest"; Endpoint = "/api/v2/collectors/kennel" },
+
+        # ── Collection Uploads ──
+        @{ Category = "Collection Uploads"; Name = "File Upload Jobs"; Description = "File upload job history"; Endpoint = "/api/v2/file-upload" },
+        @{ Category = "Collection Uploads"; Name = "Accepted Upload Types"; Description = "Accepted file types for upload"; Endpoint = "/api/v2/file-upload/accepted-types" },
+
+        # ── API Info ──
+        @{ Category = "API Info"; Name = "API Version"; Description = "BHE API version"; Endpoint = "/api/version" },
+        @{ Category = "API Info"; Name = "OpenAPI Spec"; Description = "Full OpenAPI 3.0 spec (YAML)"; Endpoint = "/api/v2/spec/openapi.yaml" },
+
+        # ── Search ──
+        @{ Category = "Search"; Name = "Search for Objects"; Description = "Search nodes by name"; Endpoint = "/api/v2/search?q={search_query}" },
+        @{ Category = "Search"; Name = "Available Domains"; Description = "All domains/tenants collected"; Endpoint = "/api/v2/available-domains" },
+
+        # ── Audit ──
+        @{ Category = "Audit"; Name = "Audit Logs"; Description = "Recent audit log entries"; Endpoint = "/api/v2/audit" },
+
+        # ── Config ──
+        @{ Category = "Config"; Name = "App Config"; Description = "Application configuration"; Endpoint = "/api/v2/config" },
+        @{ Category = "Config"; Name = "Feature Flags"; Description = "Feature flags and status"; Endpoint = "/api/v2/features" },
+
+        # ── Asset Isolation ──
+        @{ Category = "Asset Isolation"; Name = "All Asset Groups"; Description = "All asset isolation groups"; Endpoint = "/api/v2/asset-groups" },
+        @{ Category = "Asset Isolation"; Name = "Asset Group by ID"; Description = "Specific asset group details"; Endpoint = "/api/v2/asset-groups/{asset_group_id}" },
+        @{ Category = "Asset Isolation"; Name = "Asset Group Members"; Description = "Members of an asset group"; Endpoint = "/api/v2/asset-groups/{asset_group_id}/members" },
+        @{ Category = "Asset Isolation"; Name = "Asset Group Member Count"; Description = "Members count by kind"; Endpoint = "/api/v2/asset-groups/{asset_group_id}/members/counts" },
+        @{ Category = "Asset Isolation"; Name = "Asset Group Custom Member Count"; Description = "Custom-added member count"; Endpoint = "/api/v2/asset-groups/{asset_group_id}/custom-members/count" },
+        @{ Category = "Asset Isolation"; Name = "Asset Group Tags"; Description = "Tags on an asset group"; Endpoint = "/api/v2/asset-groups/{asset_group_id}/tags" },
+        @{ Category = "Asset Isolation"; Name = "Asset Group Collections"; Description = "Collection history"; Endpoint = "/api/v2/asset-groups/{asset_group_id}/collections" },
+        @{ Category = "Asset Isolation"; Name = "Asset Group History"; Description = "Historical records"; Endpoint = "/api/v2/asset-groups/{asset_group_id}/history" },
+        @{ Category = "Asset Isolation"; Name = "Privilege Zone Certifications"; Description = "Certifications for privilege zones"; Endpoint = "/api/v2/asset-groups/{asset_group_id}/certifications" },
+
+        # ── Graph ──
+        @{ Category = "Graph"; Name = "Graph Kinds"; Description = "All node and edge types"; Endpoint = "/api/v2/graphs/kinds" },
+        @{ Category = "Graph"; Name = "Pathfinding"; Description = "Find paths between two nodes"; Endpoint = "/api/v2/pathfinding?start_node={start_object_id}&end_node={end_object_id}" },
+        @{ Category = "Graph"; Name = "Graph Search"; Description = "Graph search by node"; Endpoint = "/api/v2/graphs/search?query={search_query}" },
+        @{ Category = "Graph"; Name = "Shortest Path"; Description = "Shortest path between nodes"; Endpoint = "/api/v2/graphs/shortest-path?start_node={start_object_id}&end_node={end_object_id}" },
+        @{ Category = "Graph"; Name = "Path Composition"; Description = "Decompose edge into components"; Endpoint = "/api/v2/graphs/edge-composition?source_node={source_object_id}&target_node={target_object_id}&edge_type={edge_type}" },
+        @{ Category = "Graph"; Name = "Relay Targets"; Description = "NTLM relay targets for a source"; Endpoint = "/api/v2/graphs/relay-targets?source_node={source_object_id}" },
+        @{ Category = "Graph"; Name = "ACL Inheritance Path"; Description = "ACL inheritance chain"; Endpoint = "/api/v2/graphs/acl-inheritance?object_id={object_id}" },
+
+        # ── Cypher (Saved Queries) ──
+        @{ Category = "Cypher"; Name = "Saved Queries"; Description = "All saved Cypher queries"; Endpoint = "/api/v2/saved-queries" },
+        @{ Category = "Cypher"; Name = "Export Saved Query"; Description = "Export a specific saved query"; Endpoint = "/api/v2/saved-queries/{saved_query_id}/export" },
+        @{ Category = "Cypher"; Name = "Export All Saved Queries"; Description = "Export all saved queries"; Endpoint = "/api/v2/saved-queries/export" },
+
+        # ── Azure Entities ──
+        @{ Category = "Azure Entities"; Name = "Azure Entity"; Description = "Azure/Entra entity info"; Endpoint = "/api/v2/azure/{entity_type}" },
+
+        # ── AD Base Entities ──
+        @{ Category = "AD Base Entities"; Name = "Entity Info"; Description = "Any AD entity by object ID"; Endpoint = "/api/v2/base/{object_id}" },
+        @{ Category = "AD Base Entities"; Name = "Entity Controllables"; Description = "Objects this entity can control"; Endpoint = "/api/v2/base/{object_id}/controllables" },
+        @{ Category = "AD Base Entities"; Name = "Entity Controllers"; Description = "Objects that control this entity"; Endpoint = "/api/v2/base/{object_id}/controllers" },
+
+        # ── Computers ──
+        @{ Category = "Computers"; Name = "Computer Info"; Description = "Computer entity details"; Endpoint = "/api/v2/computers/{object_id}" },
+        @{ Category = "Computers"; Name = "Computer Admin Rights"; Description = "Systems this computer admins"; Endpoint = "/api/v2/computers/{object_id}/admin-rights" },
+        @{ Category = "Computers"; Name = "Computer Admins"; Description = "Admins on this computer"; Endpoint = "/api/v2/computers/{object_id}/admins" },
+        @{ Category = "Computers"; Name = "Computer Constrained Delegation"; Description = "Constrained delegation targets"; Endpoint = "/api/v2/computers/{object_id}/constrained-delegation-rights" },
+        @{ Category = "Computers"; Name = "Computer Constrained Users"; Description = "Constrained-delegated principals"; Endpoint = "/api/v2/computers/{object_id}/constrained-users" },
+        @{ Category = "Computers"; Name = "Computer Controllables"; Description = "Objects this computer controls"; Endpoint = "/api/v2/computers/{object_id}/controllables" },
+        @{ Category = "Computers"; Name = "Computer Controllers"; Description = "Objects controlling this computer"; Endpoint = "/api/v2/computers/{object_id}/controllers" },
+        @{ Category = "Computers"; Name = "Computer DCOM Rights"; Description = "DCOM rights from this computer"; Endpoint = "/api/v2/computers/{object_id}/dcom-rights" },
+        @{ Category = "Computers"; Name = "Computer DCOM Users"; Description = "DCOM users on this computer"; Endpoint = "/api/v2/computers/{object_id}/dcom-users" },
+        @{ Category = "Computers"; Name = "Computer Group Membership"; Description = "Groups this computer is in"; Endpoint = "/api/v2/computers/{object_id}/group-membership" },
+        @{ Category = "Computers"; Name = "Computer PS Remote Rights"; Description = "PSRemote from this computer"; Endpoint = "/api/v2/computers/{object_id}/ps-remote-rights" },
+        @{ Category = "Computers"; Name = "Computer PS Remote Users"; Description = "PSRemote users on this computer"; Endpoint = "/api/v2/computers/{object_id}/ps-remote-users" },
+        @{ Category = "Computers"; Name = "Computer RDP Rights"; Description = "RDP from this computer"; Endpoint = "/api/v2/computers/{object_id}/rdp-rights" },
+        @{ Category = "Computers"; Name = "Computer RDP Users"; Description = "RDP users on this computer"; Endpoint = "/api/v2/computers/{object_id}/rdp-users" },
+        @{ Category = "Computers"; Name = "Computer Sessions"; Description = "Sessions on this computer"; Endpoint = "/api/v2/computers/{object_id}/sessions" },
+        @{ Category = "Computers"; Name = "Computer SQL Admins"; Description = "SQL admins on this computer"; Endpoint = "/api/v2/computers/{object_id}/sql-admins" },
+
+        # ── Containers ──
+        @{ Category = "Containers"; Name = "Container Info"; Description = "Container entity details"; Endpoint = "/api/v2/containers/{object_id}" },
+        @{ Category = "Containers"; Name = "Container Controllers"; Description = "Controllers of this container"; Endpoint = "/api/v2/containers/{object_id}/controllers" },
+
+        # ── Domains ──
+        @{ Category = "Domains"; Name = "Domain Info"; Description = "Domain entity details"; Endpoint = "/api/v2/domains/{object_id}" },
+        @{ Category = "Domains"; Name = "Domain Computers"; Description = "Computers in domain"; Endpoint = "/api/v2/domains/{object_id}/computers" },
+        @{ Category = "Domains"; Name = "Domain Controllers"; Description = "Principals controlling domain"; Endpoint = "/api/v2/domains/{object_id}/controllers" },
+        @{ Category = "Domains"; Name = "Domain DC Syncers"; Description = "Principals with DCSync"; Endpoint = "/api/v2/domains/{object_id}/dc-syncers" },
+        @{ Category = "Domains"; Name = "Domain Foreign Admins"; Description = "Foreign principals with admin"; Endpoint = "/api/v2/domains/{object_id}/foreign-admins" },
+        @{ Category = "Domains"; Name = "Domain Foreign GPO Controllers"; Description = "Foreign GPO controllers"; Endpoint = "/api/v2/domains/{object_id}/foreign-gpo-controllers" },
+        @{ Category = "Domains"; Name = "Domain Foreign Groups"; Description = "Foreign group memberships"; Endpoint = "/api/v2/domains/{object_id}/foreign-groups" },
+        @{ Category = "Domains"; Name = "Domain Foreign Users"; Description = "Foreign users"; Endpoint = "/api/v2/domains/{object_id}/foreign-users" },
+        @{ Category = "Domains"; Name = "Domain GPOs"; Description = "GPOs in domain"; Endpoint = "/api/v2/domains/{object_id}/gpos" },
+        @{ Category = "Domains"; Name = "Domain Groups"; Description = "Groups in domain"; Endpoint = "/api/v2/domains/{object_id}/groups" },
+        @{ Category = "Domains"; Name = "Domain Inbound Trusts"; Description = "Inbound trust relationships"; Endpoint = "/api/v2/domains/{object_id}/inbound-trusts" },
+        @{ Category = "Domains"; Name = "Domain Linked GPOs"; Description = "GPOs linked to domain"; Endpoint = "/api/v2/domains/{object_id}/linked-gpos" },
+        @{ Category = "Domains"; Name = "Domain OUs"; Description = "OUs in domain"; Endpoint = "/api/v2/domains/{object_id}/ous" },
+        @{ Category = "Domains"; Name = "Domain Outbound Trusts"; Description = "Outbound trust relationships"; Endpoint = "/api/v2/domains/{object_id}/outbound-trusts" },
+        @{ Category = "Domains"; Name = "Domain Users"; Description = "Users in domain"; Endpoint = "/api/v2/domains/{object_id}/users" },
+        @{ Category = "Domains"; Name = "Domain ADCS Escalations"; Description = "ADCS escalation paths"; Endpoint = "/api/v2/domains/{object_id}/adcs" },
+
+        # ── GPOs ──
+        @{ Category = "GPOs"; Name = "GPO Info"; Description = "GPO entity details"; Endpoint = "/api/v2/gpos/{object_id}" },
+        @{ Category = "GPOs"; Name = "GPO Computers"; Description = "Computers affected by GPO"; Endpoint = "/api/v2/gpos/{object_id}/computers" },
+        @{ Category = "GPOs"; Name = "GPO Controllers"; Description = "Principals controlling GPO"; Endpoint = "/api/v2/gpos/{object_id}/controllers" },
+        @{ Category = "GPOs"; Name = "GPO OUs"; Description = "OUs linked to GPO"; Endpoint = "/api/v2/gpos/{object_id}/ous" },
+        @{ Category = "GPOs"; Name = "GPO Tier Zero"; Description = "T0 assets affected by GPO"; Endpoint = "/api/v2/gpos/{object_id}/tier-zero" },
+        @{ Category = "GPOs"; Name = "GPO Users"; Description = "Users affected by GPO"; Endpoint = "/api/v2/gpos/{object_id}/users" },
+
+        # ── AIA CAs ──
+        @{ Category = "AIA CAs"; Name = "AIA CA Info"; Description = "AIA CA entity details"; Endpoint = "/api/v2/aia-cas/{object_id}" },
+        @{ Category = "AIA CAs"; Name = "AIA CA Controllers"; Description = "Controllers of this AIA CA"; Endpoint = "/api/v2/aia-cas/{object_id}/controllers" },
+        @{ Category = "AIA CAs"; Name = "AIA CA PKI Hierarchy"; Description = "PKI hierarchy"; Endpoint = "/api/v2/aia-cas/{object_id}/pki-hierarchy" },
+
+        # ── Root CAs ──
+        @{ Category = "Root CAs"; Name = "Root CA Info"; Description = "Root CA entity details"; Endpoint = "/api/v2/root-cas/{object_id}" },
+        @{ Category = "Root CAs"; Name = "Root CA Controllers"; Description = "Controllers of Root CA"; Endpoint = "/api/v2/root-cas/{object_id}/controllers" },
+        @{ Category = "Root CAs"; Name = "Root CA PKI Hierarchy"; Description = "PKI hierarchy"; Endpoint = "/api/v2/root-cas/{object_id}/pki-hierarchy" },
+
+        # ── Enterprise CAs ──
+        @{ Category = "Enterprise CAs"; Name = "Enterprise CA Info"; Description = "Enterprise CA details"; Endpoint = "/api/v2/enterprise-cas/{object_id}" },
+        @{ Category = "Enterprise CAs"; Name = "Enterprise CA Controllers"; Description = "Controllers of Enterprise CA"; Endpoint = "/api/v2/enterprise-cas/{object_id}/controllers" },
+        @{ Category = "Enterprise CAs"; Name = "Enterprise CA PKI Hierarchy"; Description = "PKI hierarchy"; Endpoint = "/api/v2/enterprise-cas/{object_id}/pki-hierarchy" },
+        @{ Category = "Enterprise CAs"; Name = "Enterprise CA Published Templates"; Description = "Published cert templates"; Endpoint = "/api/v2/enterprise-cas/{object_id}/published-certificate-templates" },
+
+        # ── NT Auth Stores ──
+        @{ Category = "NT Auth Stores"; Name = "NT Auth Store Info"; Description = "NT Auth Store details"; Endpoint = "/api/v2/nt-auth-stores/{object_id}" },
+        @{ Category = "NT Auth Stores"; Name = "NT Auth Store Controllers"; Description = "Controllers"; Endpoint = "/api/v2/nt-auth-stores/{object_id}/controllers" },
+        @{ Category = "NT Auth Stores"; Name = "NT Auth Store Trusted CAs"; Description = "Trusted Enterprise CAs"; Endpoint = "/api/v2/nt-auth-stores/{object_id}/trusted-enterprise-cas" },
+
+        # ── Cert Templates ──
+        @{ Category = "Cert Templates"; Name = "Cert Template Info"; Description = "Cert template details"; Endpoint = "/api/v2/cert-templates/{object_id}" },
+        @{ Category = "Cert Templates"; Name = "Cert Template Controllers"; Description = "Controllers"; Endpoint = "/api/v2/cert-templates/{object_id}/controllers" },
+        @{ Category = "Cert Templates"; Name = "Cert Template Publishing CAs"; Description = "CAs publishing this template"; Endpoint = "/api/v2/cert-templates/{object_id}/enterprise-cas" },
+
+        # ── OUs ──
+        @{ Category = "OUs"; Name = "OU Info"; Description = "OU entity details"; Endpoint = "/api/v2/ous/{object_id}" },
+        @{ Category = "OUs"; Name = "OU Computers"; Description = "Computers in OU"; Endpoint = "/api/v2/ous/{object_id}/computers" },
+        @{ Category = "OUs"; Name = "OU GPOs"; Description = "GPOs linked to OU"; Endpoint = "/api/v2/ous/{object_id}/gpos" },
+        @{ Category = "OUs"; Name = "OU Groups"; Description = "Groups in OU"; Endpoint = "/api/v2/ous/{object_id}/groups" },
+        @{ Category = "OUs"; Name = "OU Users"; Description = "Users in OU"; Endpoint = "/api/v2/ous/{object_id}/users" },
+
+        # ── AD Users ──
+        @{ Category = "AD Users"; Name = "User Info"; Description = "AD User details"; Endpoint = "/api/v2/users/{object_id}" },
+        @{ Category = "AD Users"; Name = "User Admin Rights"; Description = "Systems user admins"; Endpoint = "/api/v2/users/{object_id}/admin-rights" },
+        @{ Category = "AD Users"; Name = "User Constrained Delegation"; Description = "Constrained delegation"; Endpoint = "/api/v2/users/{object_id}/constrained-delegation-rights" },
+        @{ Category = "AD Users"; Name = "User Controllables"; Description = "Objects user controls"; Endpoint = "/api/v2/users/{object_id}/controllables" },
+        @{ Category = "AD Users"; Name = "User Controllers"; Description = "Objects controlling user"; Endpoint = "/api/v2/users/{object_id}/controllers" },
+        @{ Category = "AD Users"; Name = "User DCOM Rights"; Description = "DCOM rights"; Endpoint = "/api/v2/users/{object_id}/dcom-rights" },
+        @{ Category = "AD Users"; Name = "User Group Membership"; Description = "Group memberships"; Endpoint = "/api/v2/users/{object_id}/membership" },
+        @{ Category = "AD Users"; Name = "User PS Remote Rights"; Description = "PSRemote rights"; Endpoint = "/api/v2/users/{object_id}/ps-remote-rights" },
+        @{ Category = "AD Users"; Name = "User RDP Rights"; Description = "RDP rights"; Endpoint = "/api/v2/users/{object_id}/rdp-rights" },
+        @{ Category = "AD Users"; Name = "User Sessions"; Description = "Active sessions"; Endpoint = "/api/v2/users/{object_id}/sessions" },
+        @{ Category = "AD Users"; Name = "User SQL Admin Rights"; Description = "SQL admin rights"; Endpoint = "/api/v2/users/{object_id}/sql-admin-rights" },
+
+        # ── Groups ──
+        @{ Category = "Groups"; Name = "Group Info"; Description = "AD Group details"; Endpoint = "/api/v2/groups/{object_id}" },
+        @{ Category = "Groups"; Name = "Group Admin Rights"; Description = "Systems group admins"; Endpoint = "/api/v2/groups/{object_id}/admin-rights" },
+        @{ Category = "Groups"; Name = "Group Controllables"; Description = "Objects group controls"; Endpoint = "/api/v2/groups/{object_id}/controllables" },
+        @{ Category = "Groups"; Name = "Group Controllers"; Description = "Objects controlling group"; Endpoint = "/api/v2/groups/{object_id}/controllers" },
+        @{ Category = "Groups"; Name = "Group DCOM Rights"; Description = "DCOM rights"; Endpoint = "/api/v2/groups/{object_id}/dcom-rights" },
+        @{ Category = "Groups"; Name = "Group Members"; Description = "Direct members"; Endpoint = "/api/v2/groups/{object_id}/members" },
+        @{ Category = "Groups"; Name = "Group Memberships"; Description = "Parent groups"; Endpoint = "/api/v2/groups/{object_id}/memberships" },
+        @{ Category = "Groups"; Name = "Group PS Remote Rights"; Description = "PSRemote rights"; Endpoint = "/api/v2/groups/{object_id}/ps-remote-rights" },
+        @{ Category = "Groups"; Name = "Group RDP Rights"; Description = "RDP rights"; Endpoint = "/api/v2/groups/{object_id}/rdp-rights" },
+        @{ Category = "Groups"; Name = "Group Sessions"; Description = "Member sessions"; Endpoint = "/api/v2/groups/{object_id}/sessions" },
+
+        # ── Data Quality ──
+        @{ Category = "Data Quality"; Name = "Database Completeness Stats"; Description = "Overall completeness"; Endpoint = "/api/v2/completeness" },
+        @{ Category = "Data Quality"; Name = "AD Domain Data Quality"; Description = "Domain data quality stats"; Endpoint = "/api/v2/ad-domains/{domain_id}/data-quality-stats" },
+        @{ Category = "Data Quality"; Name = "Azure Tenant Data Quality"; Description = "Tenant data quality stats"; Endpoint = "/api/v2/azure-tenants/{tenant_id}/data-quality-stats" },
+        @{ Category = "Data Quality"; Name = "Platform Data Quality"; Description = "Aggregate quality stats"; Endpoint = "/api/v2/platform/{platform_id}/data-quality-stats" },
+
+        # ── Datapipe ──
+        @{ Category = "Datapipe"; Name = "Datapipe Status"; Description = "Analysis pipeline status"; Endpoint = "/api/v2/datapipe/status" },
+
+        # ── Analysis ──
+        @{ Category = "Analysis"; Name = "Tier Zero Combo Node"; Description = "Latest T0 composite node"; Endpoint = "/api/v2/meta-nodes/{domain_id}" },
+        @{ Category = "Analysis"; Name = "Meta Tree Graph"; Description = "Meta tree visualization"; Endpoint = "/api/v2/meta-trees/{domain_id}" },
+        @{ Category = "Analysis"; Name = "Asset Group Combo Tree"; Description = "Combo tree for asset group"; Endpoint = "/api/v2/asset-groups/{asset_group_id}/combo-node" },
+
+        # ── Clients ──
+        @{ Category = "Clients"; Name = "Clients"; Description = "Registered collectors"; Endpoint = "/api/v2/clients" },
+        @{ Category = "Clients"; Name = "Client"; Description = "Specific client details"; Endpoint = "/api/v2/clients/{client_id}" },
+        @{ Category = "Clients"; Name = "Client Completed Tasks"; Description = "Completed tasks for client"; Endpoint = "/api/v2/clients/{client_id}/completed-tasks" },
+        @{ Category = "Clients"; Name = "Client Completed Jobs"; Description = "Completed jobs for client"; Endpoint = "/api/v2/clients/{client_id}/completed-jobs" },
+
+        # ── Jobs ──
+        @{ Category = "Jobs"; Name = "Available Jobs"; Description = "Available client jobs"; Endpoint = "/api/v2/jobs/available" },
+        @{ Category = "Jobs"; Name = "Finished Jobs"; Description = "Completed job history"; Endpoint = "/api/v2/jobs/finished" },
+        @{ Category = "Jobs"; Name = "Jobs"; Description = "All jobs with status"; Endpoint = "/api/v2/jobs" },
+        @{ Category = "Jobs"; Name = "Client Current Job"; Description = "Running job for a client"; Endpoint = "/api/v2/jobs/current/{client_id}" },
+        @{ Category = "Jobs"; Name = "Job Details"; Description = "Specific job details"; Endpoint = "/api/v2/jobs/{job_id}" },
+        @{ Category = "Jobs"; Name = "Job Log File"; Description = "Log for a specific job"; Endpoint = "/api/v2/jobs/{job_id}/log" },
+
+        # ── Events (Schedules) ──
+        @{ Category = "Events"; Name = "Events"; Description = "Scheduled collection events"; Endpoint = "/api/v2/events" },
+        @{ Category = "Events"; Name = "Event"; Description = "Specific event details"; Endpoint = "/api/v2/events/{event_id}" },
+
+        # ── Attack Paths ──
+        @{ Category = "Attack Paths"; Name = "Export All Findings"; Description = "Export all attack path findings"; Endpoint = "/api/v2/attack-paths/details" },
+        @{ Category = "Attack Paths"; Name = "All Findings"; Description = "All findings summary"; Endpoint = "/api/v2/attack-paths" },
+        @{ Category = "Attack Paths"; Name = "Attack Path Types"; Description = "Available attack path types"; Endpoint = "/api/v2/attack-path-types" },
+        @{ Category = "Attack Paths"; Name = "Domain Available Paths"; Description = "Available paths for domain"; Endpoint = "/api/v2/domains/{domain_id}/available-attack-paths" },
+        @{ Category = "Attack Paths"; Name = "Domain Path Details"; Description = "Path details for domain"; Endpoint = "/api/v2/domains/{domain_id}/attack-path-findings" },
+        @{ Category = "Attack Paths"; Name = "Attack Path Sparklines"; Description = "Trend sparkline data"; Endpoint = "/api/v2/domains/{domain_id}/sparkline" },
+        @{ Category = "Attack Paths"; Name = "Finding Trends"; Description = "Historical finding trends"; Endpoint = "/api/v2/attack-paths/finding-trends" },
+
+        # ── Risk Posture ──
+        @{ Category = "Risk Posture"; Name = "Posture Statistics"; Description = "Overall risk posture"; Endpoint = "/api/v2/posture-stats" },
+        @{ Category = "Risk Posture"; Name = "Posture History"; Description = "Historical posture data"; Endpoint = "/api/v2/posture-history" },
+
+        # ── Meta Entities ──
+        @{ Category = "Meta Entities"; Name = "Meta Entity Info"; Description = "Meta entity details"; Endpoint = "/api/v2/meta/{object_id}" }
+    )
+}
+
+# ============================================================================
+# CYPHER LIBRARY BROWSER
+# ============================================================================
+function Show-CypherLibrary {
+    param(
+        [array]$Library,
+        [string]$BaseUrl,
+        [string]$TokenId,
+        [string]$TokenKey
+    )
+
+    while ($true) {
+        $categories = $Library | Group-Object { $_.Category } | Sort-Object Name
+
+        Write-Host ""
+        Write-Host "  -- Cypher Query Library ------------------------------------" -ForegroundColor DarkCyan
+        Write-Host "     Source: https://queries.specterops.io/" -ForegroundColor DarkGray
+        Write-Host ""
+
+        $index = 1
+        $queryMap = @{}
+        foreach ($cat in $categories) {
+            Write-Host "  [$($cat.Name)]" -ForegroundColor Magenta
+            foreach ($q in $cat.Group) {
+                $queryMap[$index] = $q
+                $paddedIndex = $index.ToString().PadLeft(3)
+                Write-Host "   $paddedIndex. " -ForegroundColor DarkGray -NoNewline
+                Write-Host "$($q.Name)" -ForegroundColor White -NoNewline
+                Write-Host " - $($q.Description)" -ForegroundColor DarkGray
+                $index++
+            }
+            Write-Host ""
+        }
+
+        Write-Host "  Enter query number to run (or 'back'):" -ForegroundColor Yellow
+        $pick = Read-Host "  CYPHER-LIB>"
+
+        if ($pick -eq 'back' -or [string]::IsNullOrWhiteSpace($pick)) { return }
+
+        $pickNum = 0
+        if ([int]::TryParse($pick, [ref]$pickNum) -and $queryMap.ContainsKey($pickNum)) {
+            $selected = $queryMap[$pickNum]
+
+            Write-Host ""
+            Write-Host "  Running: $($selected.Name)" -ForegroundColor Cyan
+            Write-Host "  Query: $($selected.Query)" -ForegroundColor DarkYellow
+
+            $result = Invoke-BHECypher -BaseUrl $BaseUrl -Query $selected.Query `
+                -TokenId $TokenId -TokenKey $TokenKey
+            Format-APIResult -Result $result
+
+            Write-Host ""
+            $exportChoice = Read-Host "  Export to CSV? (enter file path or press Enter to skip)"
+            if (-not [string]::IsNullOrWhiteSpace($exportChoice)) {
+                Format-APIResult -Result $result -ExportPath $exportChoice
+            }
+
+            Write-Host ""
+            Write-Host "  Press Enter to return to library..." -ForegroundColor DarkGray
+            Read-Host | Out-Null
+        }
+        else {
+            Write-Host "  [!] Invalid selection." -ForegroundColor Red
+        }
+    }
+}
+
+# ============================================================================
+# API LIBRARY BROWSER
+# ============================================================================
+function Show-APILibrary {
+    param(
+        [array]$Library,
+        [string]$BaseUrl,
+        [string]$TokenId,
+        [string]$TokenKey
+    )
+
+    while ($true) {
+        $categories = $Library | Group-Object { $_.Category } | Sort-Object Name
+
+        Write-Host ""
+        Write-Host "  -- API Endpoint Library ------------------------------------" -ForegroundColor DarkCyan
+        Write-Host "     Source: bloodhound.specterops.io/reference" -ForegroundColor DarkGray
+        Write-Host "     Endpoints with {param} will prompt for input" -ForegroundColor DarkGray
+        Write-Host ""
+
+        $index = 1
+        $queryMap = @{}
+        foreach ($cat in $categories) {
+            Write-Host "  [$($cat.Name)]" -ForegroundColor Magenta
+            foreach ($q in $cat.Group) {
+                $queryMap[$index] = $q
+                $paddedIndex = $index.ToString().PadLeft(3)
+                $hasParams = $q.Endpoint -match '\{[^}]+\}'
+                if ($hasParams) { $paramTag = "*" } else { $paramTag = " " }
+                $method = if ($q.HttpMethod) { $q.HttpMethod } else { "GET" }
+
+                # Strip redundant Get/List from display name since method shown
+                $displayName = $q.Name -replace '^Get ', '' -replace '^List ', ''
+                $col1 = "$($method.PadRight(6))$($displayName)".PadRight(42)
+
+                Write-Host "   $paddedIndex.$paramTag" -ForegroundColor DarkGray -NoNewline
+                Write-Host "$($method.PadRight(6))" -ForegroundColor Green -NoNewline
+                Write-Host "$($displayName.PadRight(36))" -ForegroundColor White -NoNewline
+                Write-Host "$($q.Endpoint)" -ForegroundColor DarkCyan
+                $index++
+            }
+            Write-Host ""
+        }
+
+        Write-Host "  (* = requires parameter input)" -ForegroundColor DarkGray
+        Write-Host ""
+        Write-Host "  Enter endpoint number to run (or 'back'):" -ForegroundColor Yellow
+        $pick = Read-Host "  API-LIB>"
+
+        if ($pick -eq 'back' -or [string]::IsNullOrWhiteSpace($pick)) { return }
+
+        $pickNum = 0
+        if ([int]::TryParse($pick, [ref]$pickNum) -and $queryMap.ContainsKey($pickNum)) {
+            $selected = $queryMap[$pickNum]
+            $endpoint = $selected.Endpoint
+
+            # Check for {param} placeholders and prompt
+            $paramMatches = [regex]::Matches($endpoint, '\{([^}]+)\}')
+            if ($paramMatches.Count -gt 0) {
+                Write-Host ""
+                Write-Host "  This endpoint requires parameters:" -ForegroundColor Yellow
+                foreach ($m in $paramMatches) {
+                    $paramName = $m.Groups[1].Value
+                    $paramValue = Read-Host "  Enter $paramName"
+                    if ([string]::IsNullOrWhiteSpace($paramValue)) {
+                        Write-Host "  [!] Cancelled - parameter required." -ForegroundColor Red
+                        $endpoint = $null
+                        break
+                    }
+                    $endpoint = $endpoint.Replace($m.Value, $paramValue)
+                }
+            }
+
+            if ($endpoint) {
+                Write-Host ""
+                Write-Host "  Running: $($selected.Name)" -ForegroundColor Cyan
+
+                $result = Invoke-BHERequest -BaseUrl $BaseUrl -Endpoint $endpoint `
+                    -RequestMethod "GET" -TokenId $TokenId -TokenKey $TokenKey
+                Format-APIResult -Result $result
+
+                Write-Host ""
+                $exportChoice = Read-Host "  Export to CSV? (enter file path or press Enter to skip)"
+                if (-not [string]::IsNullOrWhiteSpace($exportChoice)) {
+                    Format-APIResult -Result $result -ExportPath $exportChoice
+                }
+
+                Write-Host ""
+                Write-Host "  Press Enter to return to library..." -ForegroundColor DarkGray
+                Read-Host | Out-Null
+            }
+        }
+        else {
+            Write-Host "  [!] Invalid selection." -ForegroundColor Red
+        }
+    }
 }
 
 # ============================================================================
@@ -766,7 +1515,8 @@ function Start-InteractiveConsole {
         [string]$TokenKey
     )
 
-    $library = Get-QueryLibrary
+    $cypherLib = Get-CypherLibrary
+    $apiLib = Get-APILibrary
 
     while ($true) {
         Write-Host ""
@@ -774,71 +1524,22 @@ function Start-InteractiveConsole {
         Write-Host "               BHE Interactive Console                   " -ForegroundColor Cyan
         Write-Host "  ======================================================" -ForegroundColor Cyan
         Write-Host ""
-        Write-Host "   [1]  Run a Cypher Query (freeform)                   " -ForegroundColor White
-        Write-Host "   [2]  Run an API Call (freeform)                      " -ForegroundColor White
-        Write-Host "   [3]  Query Library (pre-built queries)               " -ForegroundColor White
-        Write-Host "   [4]  Quick Info (version, self, domains)             " -ForegroundColor White
-        Write-Host "   [Q]  Quit                                            " -ForegroundColor White
+        Write-Host "   [0]  Quick Info (version, self, domains)             " -ForegroundColor White
+        Write-Host ""
+        Write-Host "   CYPHER" -ForegroundColor Yellow
+        Write-Host "   [1]  Run a Cypher Query (from cypher.txt or manual) " -ForegroundColor White
+        Write-Host "   [2]  Cypher Query Library (pre-built queries)       " -ForegroundColor White
+        Write-Host ""
+        Write-Host "   API" -ForegroundColor Green
+        Write-Host "   [3]  Run an API Call (freeform)                     " -ForegroundColor White
+        Write-Host "   [4]  API Endpoint Library (pre-built GET calls)     " -ForegroundColor White
+        Write-Host ""
+        Write-Host "   [Q]  Quit                                           " -ForegroundColor White
         Write-Host ""
         $choice = Read-Host "  Select option"
 
         switch ($choice.ToUpper()) {
-            "1" {
-                # Freeform Cypher
-                Write-Host ""
-                Write-Host "  Enter Cypher query (or 'back' to return):" -ForegroundColor Yellow
-                Write-Host "  Tip: Enter full query on one line." -ForegroundColor DarkGray
-                Write-Host ""
-                $query = Read-Host "  CYPHER>"
-
-                if ($query -eq 'back' -or [string]::IsNullOrWhiteSpace($query)) { continue }
-
-                $result = Invoke-BHECypher -BaseUrl $BaseUrl -Query $query -TokenId $TokenId -TokenKey $TokenKey
-                Format-APIResult -Result $result
-
-                Write-Host ""
-                $exportChoice = Read-Host "  Export to CSV? (enter file path or press Enter to skip)"
-                if (-not [string]::IsNullOrWhiteSpace($exportChoice)) {
-                    Format-APIResult -Result $result -ExportPath $exportChoice
-                }
-            }
-
-            "2" {
-                # Freeform API
-                Write-Host ""
-                Write-Host "  Enter API endpoint (e.g., /api/v2/available-domains):" -ForegroundColor Yellow
-                $endpoint = Read-Host "  API>"
-
-                if ($endpoint -eq 'back' -or [string]::IsNullOrWhiteSpace($endpoint)) { continue }
-
-                Write-Host "  HTTP Method [GET/POST/PUT/DELETE] (default: GET):" -ForegroundColor Yellow
-                $apiMethod = Read-Host "  METHOD>"
-                if ([string]::IsNullOrWhiteSpace($apiMethod)) { $apiMethod = "GET" }
-
-                $apiBody = ""
-                if ($apiMethod.ToUpper() -in @("POST","PUT","PATCH")) {
-                    Write-Host "  Request body (JSON):" -ForegroundColor Yellow
-                    $apiBody = Read-Host "  BODY>"
-                }
-
-                $result = Invoke-BHERequest -BaseUrl $BaseUrl -Endpoint $endpoint `
-                    -RequestMethod $apiMethod.ToUpper() -RequestBody $apiBody `
-                    -TokenId $TokenId -TokenKey $TokenKey
-                Format-APIResult -Result $result
-
-                Write-Host ""
-                $exportChoice = Read-Host "  Export to CSV? (enter file path or press Enter to skip)"
-                if (-not [string]::IsNullOrWhiteSpace($exportChoice)) {
-                    Format-APIResult -Result $result -ExportPath $exportChoice
-                }
-            }
-
-            "3" {
-                # Query Library
-                Show-QueryLibrary -Library $library -BaseUrl $BaseUrl -TokenId $TokenId -TokenKey $TokenKey
-            }
-
-            "4" {
+            "0" {
                 # Quick Info
                 Write-Host ""
                 Write-Host "  -- Quick Info -----------------------------------------------" -ForegroundColor DarkCyan
@@ -910,6 +1611,114 @@ function Start-InteractiveConsole {
                 Write-Host "  ---------------------------------------------------------------" -ForegroundColor DarkCyan
             }
 
+            "1" {
+                # Freeform Cypher
+                Write-Host ""
+
+                # Check for cypher.txt in script directory
+                $cypherFile = Join-Path $scriptDir "cypher.txt"
+                if (-not $scriptDir) {
+                    $cypherFile = Join-Path (Get-Location) "cypher.txt"
+                }
+
+                $query = $null
+
+                if (Test-Path $cypherFile) {
+                    $fileContent = (Get-Content $cypherFile -Raw -ErrorAction SilentlyContinue).Trim()
+                    if (-not [string]::IsNullOrWhiteSpace($fileContent)) {
+                        # Remove comment lines (starting with // or #)
+                        $cleanLines = $fileContent -split "`n" | Where-Object {
+                            $trimLine = $_.Trim()
+                            -not $trimLine.StartsWith('//') -and -not $trimLine.StartsWith('#') -and -not [string]::IsNullOrWhiteSpace($trimLine)
+                        }
+                        $query = ($cleanLines -join "`n").Trim()
+
+                        Write-Host "  [+] Loaded query from: $cypherFile" -ForegroundColor Green
+                        # Show preview
+                        $preview = if ($query.Length -gt 120) { $query.Substring(0, 120) + '...' } else { $query }
+                        Write-Host "      $preview" -ForegroundColor DarkYellow
+                        Write-Host ""
+                        $confirm = Read-Host "  Run this query? [Y/n]"
+                        if ($confirm -eq 'n' -or $confirm -eq 'N') {
+                            Write-Host "  Skipped. You can also type a query manually:" -ForegroundColor DarkGray
+                            $query = $null
+                        }
+                    }
+                    else {
+                        Write-Host "  [*] cypher.txt found but empty" -ForegroundColor DarkGray
+                    }
+                }
+                else {
+                    Write-Host "  [*] No cypher.txt found in: $cypherFile" -ForegroundColor DarkGray
+                    Write-Host "      Tip: Paste your query into cypher.txt to avoid quoting issues" -ForegroundColor DarkGray
+                }
+
+                # Fall back to manual input if no file query
+                if ([string]::IsNullOrWhiteSpace($query)) {
+                    Write-Host ""
+                    Write-Host "  Enter Cypher query (or 'back' to return):" -ForegroundColor Yellow
+                    $query = Read-Host "  CYPHER>"
+                }
+
+                if ($query -eq 'back' -or [string]::IsNullOrWhiteSpace($query)) { continue }
+
+                $result = Invoke-BHECypher -BaseUrl $BaseUrl -Query $query -TokenId $TokenId -TokenKey $TokenKey
+                Format-APIResult -Result $result
+
+                Write-Host ""
+                $exportChoice = Read-Host "  Export to CSV? (enter file path or press Enter to skip)"
+                if (-not [string]::IsNullOrWhiteSpace($exportChoice)) {
+                    Format-APIResult -Result $result -ExportPath $exportChoice
+                }
+            }
+
+            "2" {
+                # Cypher Query Library
+                Show-CypherLibrary -Library $cypherLib -BaseUrl $BaseUrl -TokenId $TokenId -TokenKey $TokenKey
+            }
+
+            "3" {
+                # Freeform API
+                Write-Host ""
+                Write-Host "  HTTP Method [GET/POST/PUT/DELETE] (default: GET):" -ForegroundColor Yellow
+                $apiMethod = Read-Host "  METHOD>"
+                if ([string]::IsNullOrWhiteSpace($apiMethod)) { $apiMethod = "GET" }
+
+                Write-Host "  Enter API endpoint (e.g., /api/v2/available-domains):" -ForegroundColor Yellow
+                $endpoint = Read-Host "  API>"
+
+                if ($endpoint -eq 'back' -or [string]::IsNullOrWhiteSpace($endpoint)) { continue }
+
+                # Validate endpoint looks like an API path
+                if ($endpoint -notmatch '^/') {
+                    Write-Host "  [!] Endpoint must start with / (e.g., /api/v2/available-domains)" -ForegroundColor Red
+                    Write-Host "      You entered: $endpoint" -ForegroundColor DarkRed
+                    continue
+                }
+
+                $apiBody = ""
+                if ($apiMethod.ToUpper() -in @("POST","PUT","PATCH")) {
+                    Write-Host "  Request body (JSON):" -ForegroundColor Yellow
+                    $apiBody = Read-Host "  BODY>"
+                }
+
+                $result = Invoke-BHERequest -BaseUrl $BaseUrl -Endpoint $endpoint `
+                    -RequestMethod $apiMethod.ToUpper() -RequestBody $apiBody `
+                    -TokenId $TokenId -TokenKey $TokenKey
+                Format-APIResult -Result $result
+
+                Write-Host ""
+                $exportChoice = Read-Host "  Export to CSV? (enter file path or press Enter to skip)"
+                if (-not [string]::IsNullOrWhiteSpace($exportChoice)) {
+                    Format-APIResult -Result $result -ExportPath $exportChoice
+                }
+            }
+
+            "4" {
+                # API Endpoint Library
+                Show-APILibrary -Library $apiLib -BaseUrl $BaseUrl -TokenId $TokenId -TokenKey $TokenKey
+            }
+
             "Q" {
                 Write-Host ""
                 Write-Host "  [*] Exiting console. Goodbye!" -ForegroundColor Cyan
@@ -918,89 +1727,12 @@ function Start-InteractiveConsole {
             }
 
             default {
-                Write-Host "  [!] Invalid option. Try 1-4 or Q." -ForegroundColor Red
+                Write-Host "  [!] Invalid option. Try 0-4 or Q." -ForegroundColor Red
             }
         }
     }
 }
 
-# ============================================================================
-# QUERY LIBRARY BROWSER
-# ============================================================================
-function Show-QueryLibrary {
-    param(
-        [array]$Library,
-        [string]$BaseUrl,
-        [string]$TokenId,
-        [string]$TokenKey
-    )
-
-    while ($true) {
-        # Group by category
-        $categories = $Library | Group-Object { $_.Category } | Sort-Object Name
-
-        Write-Host ""
-        Write-Host "  -- Query Library -------------------------------------------" -ForegroundColor DarkCyan
-        Write-Host ""
-
-        $index = 1
-        $queryMap = @{}
-        foreach ($cat in $categories) {
-            Write-Host "  [$($cat.Name)]" -ForegroundColor Magenta
-            foreach ($q in $cat.Group) {
-                if ($q.Type -eq "Cypher") { $typeTag = "CYP" } else { $typeTag = "API" }
-                if ($q.Type -eq "Cypher") { $tagColor = "Yellow" } else { $tagColor = "Green" }
-                $queryMap[$index] = $q
-
-                $paddedIndex = $index.ToString().PadLeft(2)
-                Write-Host "    $paddedIndex. " -ForegroundColor DarkGray -NoNewline
-                Write-Host "[$typeTag] " -ForegroundColor $tagColor -NoNewline
-                Write-Host "$($q.Name)" -ForegroundColor White -NoNewline
-                Write-Host " - $($q.Description)" -ForegroundColor DarkGray
-                $index++
-            }
-            Write-Host ""
-        }
-
-        Write-Host "  Enter query number to run (or 'back'):" -ForegroundColor Yellow
-        $pick = Read-Host "  LIBRARY>"
-
-        if ($pick -eq 'back' -or [string]::IsNullOrWhiteSpace($pick)) { return }
-
-        $pickNum = 0
-        if ([int]::TryParse($pick, [ref]$pickNum) -and $queryMap.ContainsKey($pickNum)) {
-            $selected = $queryMap[$pickNum]
-
-            Write-Host ""
-            Write-Host "  Running: $($selected.Name)" -ForegroundColor Cyan
-
-            if ($selected.Type -eq "Cypher") {
-                Write-Host "  Query: $($selected.Query)" -ForegroundColor DarkYellow
-                $result = Invoke-BHECypher -BaseUrl $BaseUrl -Query $selected.Query `
-                    -TokenId $TokenId -TokenKey $TokenKey
-            }
-            else {
-                $result = Invoke-BHERequest -BaseUrl $BaseUrl -Endpoint $selected.Endpoint `
-                    -RequestMethod $selected.HttpMethod -TokenId $TokenId -TokenKey $TokenKey
-            }
-
-            Format-APIResult -Result $result
-
-            Write-Host ""
-            $exportChoice = Read-Host "  Export to CSV? (enter file path or press Enter to skip)"
-            if (-not [string]::IsNullOrWhiteSpace($exportChoice)) {
-                Format-APIResult -Result $result -ExportPath $exportChoice
-            }
-
-            Write-Host ""
-            Write-Host "  Press Enter to return to library..." -ForegroundColor DarkGray
-            Read-Host | Out-Null
-        }
-        else {
-            Write-Host "  [!] Invalid selection." -ForegroundColor Red
-        }
-    }
-}
 
 # ============================================================================
 # AUTHENTICATION TEST
