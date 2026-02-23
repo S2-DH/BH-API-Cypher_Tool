@@ -51,6 +51,9 @@
 .PARAMETER Interactive
     Launch the interactive query console after auth test.
 
+.PARAMETER DebugMode
+    Enable verbose debug output showing full URLs, request bodies, and response structure.
+
 .PARAMETER ExportCSV
     Export results to CSV file (provide file path)
 
@@ -81,6 +84,10 @@
 .EXAMPLE
     # API call with CSV export
     .\BHE-API-Console.ps1 -API "/api/v2/available-domains" -ExportCSV "domains.csv"
+
+.EXAMPLE
+    # Interactive mode with debug output
+    .\BHE-API-Console.ps1 -Interactive -DebugMode
 #>
 
 [CmdletBinding()]
@@ -114,8 +121,14 @@ param(
     [switch]$Interactive,
 
     [Parameter()]
+    [switch]$DebugMode,
+
+    [Parameter()]
     [string]$ExportCSV
 )
+
+# Script-scoped debug flag accessible from all functions
+$script:BHEDebug = $DebugMode.IsPresent
 
 # ============================================================================
 # BANNER
@@ -124,10 +137,13 @@ function Show-Banner {
     Write-Host ""
     Write-Host "  ======================================================" -ForegroundColor Cyan
     Write-Host "                                                        " -ForegroundColor Cyan
-    Write-Host "           BHE API Console v1.1                         " -ForegroundColor Cyan
+    Write-Host "           BHE API Console v1.3                         " -ForegroundColor Cyan
     Write-Host "           Authentication + Query Engine                 " -ForegroundColor Cyan
     Write-Host "                                                        " -ForegroundColor Cyan
     Write-Host "  ======================================================" -ForegroundColor Cyan
+    if ($script:BHEDebug) {
+        Write-Host "  [DEBUG MODE ENABLED]" -ForegroundColor Yellow
+    }
     Write-Host ""
 }
 
@@ -269,13 +285,16 @@ function Invoke-BHERequest {
 
     if (-not $Silent) {
         Write-Host "  [>] $RequestMethod $Endpoint" -ForegroundColor Yellow
-        Write-Host "  [DEBUG] Full URL: $fullUrl" -ForegroundColor DarkGray
-        if ($RequestBody) {
-            $bodyPreview = if ($RequestBody.Length -gt 200) { $RequestBody.Substring(0, 200) + '...' } else { $RequestBody }
-            Write-Host "  [DEBUG] Has Body: YES ($($RequestBody.Length) chars)" -ForegroundColor DarkGray
-        }
-        else {
-            Write-Host "  [DEBUG] Has Body: NO" -ForegroundColor DarkGray
+        if ($script:BHEDebug) {
+            Write-Host "  [DEBUG] Full URL: $fullUrl" -ForegroundColor DarkGray
+            if ($RequestBody) {
+                $bodyPreview = if ($RequestBody.Length -gt 200) { $RequestBody.Substring(0, 200) + '...' } else { $RequestBody }
+                Write-Host "  [DEBUG] Has Body: YES ($($RequestBody.Length) chars)" -ForegroundColor DarkGray
+                Write-Host "  [DEBUG] Body: $bodyPreview" -ForegroundColor DarkGray
+            }
+            else {
+                Write-Host "  [DEBUG] Has Body: NO" -ForegroundColor DarkGray
+            }
         }
     }
 
@@ -384,12 +403,15 @@ function Invoke-BHECypher {
     $bodyJson = $bodyJson.Replace('\u002b', '+')    # plus
     $bodyJson = $bodyJson.Replace('\u0060', '`')    # backtick
 
-    if (-not $Silent) {
-        Write-Host "  [DEBUG] Body: $bodyJson" -ForegroundColor DarkGray
+    if (-not $Silent -and $script:BHEDebug) {
+        Write-Host "  [DEBUG] Cypher Body: $bodyJson" -ForegroundColor DarkGray
     }
 
     $result = Invoke-BHERequest -BaseUrl $BaseUrl -Endpoint "/api/v2/graphs/cypher" `
         -RequestMethod "POST" -RequestBody $bodyJson -TokenId $TokenId -TokenKey $TokenKey -Silent:$Silent
+
+    # Tag as Cypher so Format-APIResult knows how to display it
+    if ($result) { $result.IsCypher = $true }
 
     return $result
 }
@@ -423,23 +445,18 @@ function Format-APIResult {
     }
 
     $data = $Result.Data
-    $isCypher = $Result.Endpoint -match '/graphs/cypher'
     Write-Host ""
 
-    # ── Debug: Always dump raw JSON structure keys ──
-    Write-Host "  [DEBUG] Response type: $($data.GetType().Name)" -ForegroundColor DarkGray
-    if ($data.PSObject -and $data.PSObject.Properties) {
-        $topKeys = @($data.PSObject.Properties | Select-Object -First 10 | ForEach-Object { $_.Name }) -join ', '
-        Write-Host "  [DEBUG] Top-level keys: $topKeys" -ForegroundColor DarkGray
-    }
-
     # ── CYPHER RESULTS (nodes/edges graph data) ──
-    if ($isCypher) {
+    if ($Result.IsCypher) {
         # Unwrap nested 'data' envelope: { "data": { "nodes": {...}, "edges": {...} } }
-        if ($data.data -and ($data.data.PSObject.Properties.Name -contains 'nodes' -or $data.data.PSObject.Properties.Name -contains 'edges')) {
-            Write-Host "  [DEBUG] Unwrapping nested data.data envelope" -ForegroundColor DarkGray
-            $data = $data.data
+        if ($data.data -and $data.data.PSObject -and $data.data.PSObject.Properties) {
+            $dataKeys = @($data.data.PSObject.Properties | ForEach-Object { $_.Name })
+            if ($dataKeys -contains 'nodes' -or $dataKeys -contains 'edges') {
+                $data = $data.data
+            }
         }
+
         $nodeCount = 0
         $edgeCount = 0
 
@@ -568,45 +585,75 @@ function Format-APIResult {
             }
         }
     }
-    # ── Handle standard API responses (arrays/objects) ──
+    # ── API RESULTS (standard JSON responses) ──
     else {
+        # Unwrap data envelope if present
         $items = $null
+        $rawData = $data
 
-        # Check if data.data is an array of items (standard API response)
-        if ($data.data -and $data.data -is [System.Array]) {
-            $items = $data.data
+        # Many BHE API responses wrap arrays in { "data": [...], "count": N }
+        if ($data.PSObject -and $data.PSObject.Properties) {
+            $propNames = @($data.PSObject.Properties | ForEach-Object { $_.Name })
+            if ($propNames -contains 'data') {
+                $inner = $data.data
+                if ($inner -is [System.Array]) {
+                    $items = $inner
+                    $totalCount = if ($data.count) { $data.count } else { $items.Count }
+                }
+                elseif ($inner -is [PSCustomObject] -or $inner -is [System.Management.Automation.PSCustomObject]) {
+                    # Single object wrapped in data envelope
+                    $rawData = $inner
+                }
+            }
         }
-        elseif ($data -is [System.Array]) {
+
+        # Direct array response (no envelope)
+        if (-not $items -and $data -is [System.Array]) {
             $items = $data
+            $totalCount = $items.Count
         }
 
+        # ── Array of items: display as table ──
         if ($items -and $items.Count -gt 0) {
-            $itemCount = $items.Count
             Write-Host "  -------------------------------------------------" -ForegroundColor DarkCyan
-            Write-Host "    API Results: $itemCount items" -ForegroundColor Cyan
+            Write-Host "    API Results: $($items.Count) items" -ForegroundColor Cyan
+            if ($totalCount -and $totalCount -gt $items.Count) {
+                Write-Host "    (Total: $totalCount - showing returned page)" -ForegroundColor DarkGray
+            }
             Write-Host "  -------------------------------------------------" -ForegroundColor DarkCyan
             Write-Host ""
 
-            # Auto-detect columns from first item
-            $sampleProps = @($items[0].PSObject.Properties | Select-Object -First 6)
+            # Auto-detect columns from first item (max 8 columns)
+            $sampleProps = @($items[0].PSObject.Properties | Where-Object {
+                # Skip nested objects/arrays for table display
+                $val = $_.Value
+                -not ($val -is [PSCustomObject] -or $val -is [System.Management.Automation.PSCustomObject])
+            } | Select-Object -First 8)
+
             $displayObjects = @()
 
             $counter = 0
             foreach ($item in $items) {
                 $counter++
                 if ($counter -gt 100) {
-                    $truncMsg = '  ... {0} total, showing first 100' -f $itemCount
-                    Write-Host $truncMsg -ForegroundColor DarkGray
+                    Write-Host "  ... $($items.Count) total, showing first 100" -ForegroundColor DarkGray
                     break
                 }
 
                 $obj = [ordered]@{ '#' = $counter }
                 foreach ($prop in $sampleProps) {
                     $val = $item.($prop.Name)
-                    if ($val -is [System.Collections.ICollection]) {
+                    if ($null -eq $val) { $val = "" }
+                    elseif ($val -is [System.Array]) {
                         $val = ($val | ForEach-Object { $_.ToString() }) -join ", "
                     }
-                    $obj[$prop.Name] = $val
+                    elseif ($val -is [PSCustomObject]) {
+                        $val = "(object)"
+                    }
+                    # Truncate long strings for table display
+                    $valStr = $val.ToString()
+                    if ($valStr.Length -gt 60) { $valStr = $valStr.Substring(0, 57) + "..." }
+                    $obj[$prop.Name] = $valStr
                 }
                 $displayObjects += [PSCustomObject]$obj
             }
@@ -618,16 +665,33 @@ function Format-APIResult {
                 Export-Results -Objects $displayObjects -Path $ExportPath
             }
         }
+        # ── Single object or non-array: display as formatted JSON ──
         else {
-            # Single object / raw response - dump as JSON
             Write-Host "  -------------------------------------------------" -ForegroundColor DarkCyan
-            Write-Host "    API Response (Raw JSON)" -ForegroundColor Cyan
+            Write-Host "    API Response" -ForegroundColor Cyan
             Write-Host "  -------------------------------------------------" -ForegroundColor DarkCyan
             Write-Host ""
-            $jsonOut = $data | ConvertTo-Json -Depth 10
-            Write-Host $jsonOut -ForegroundColor White
+
+            # Pretty-print the object properties
+            if ($rawData.PSObject -and $rawData.PSObject.Properties) {
+                foreach ($prop in $rawData.PSObject.Properties) {
+                    $val = $prop.Value
+                    if ($val -is [PSCustomObject] -or $val -is [System.Array]) {
+                        $val = $val | ConvertTo-Json -Depth 3 -Compress
+                        if ($val.Length -gt 120) { $val = $val.Substring(0, 117) + "..." }
+                    }
+                    $namePad = $prop.Name.PadRight(25)
+                    Write-Host "    $namePad" -ForegroundColor White -NoNewline
+                    Write-Host "$val" -ForegroundColor Green
+                }
+            }
+            else {
+                $jsonOut = $rawData | ConvertTo-Json -Depth 10
+                Write-Host $jsonOut -ForegroundColor White
+            }
 
             if ($ExportPath) {
+                $jsonOut = $rawData | ConvertTo-Json -Depth 10
                 $jsonOut | Out-File -FilePath $ExportPath -Encoding UTF8
                 Write-Host ""
                 Write-Host "  [+] JSON exported to: $ExportPath" -ForegroundColor Green
