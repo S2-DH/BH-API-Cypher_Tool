@@ -1,7 +1,7 @@
-[README.md](https://github.com/user-attachments/files/25375967/README.md)
+[README.md](https://github.com/user-attachments/files/25482897/README.md)
 # BHE-API-Console.ps1
 
-A PowerShell interactive console for BloodHound Enterprise, providing HMAC-authenticated API access, a Cypher query engine, and pre-built query libraries.
+PowerShell interactive console for BloodHound Enterprise. HMAC-authenticated API access, Cypher query engine, and pre-built query libraries.
 
 ## Requirements
 
@@ -11,7 +11,7 @@ A PowerShell interactive console for BloodHound Enterprise, providing HMAC-authe
 
 ## Setup
 
-1. Create a `.env` file in the same directory as the script:
+Create a `.env` file in the same directory as the script:
 
 ```
 BHE_URL=https://yourtenant.bloodhoundenterprise.io
@@ -19,15 +19,33 @@ BHE_API_ID=your-token-id
 BHE_API_KEY=your-token-key
 ```
 
-2. Run the script:
+## Usage
 
 ```powershell
+# Auth test only (default)
+.\BHE-API-Console.ps1
+
+# Interactive console
 .\BHE-API-Console.ps1 -Interactive
+
+# Interactive with debug output
+.\BHE-API-Console.ps1 -Interactive -DebugMode
+
+# Direct API call
+.\BHE-API-Console.ps1 -API "/api/v2/available-domains"
+
+# Direct Cypher query
+.\BHE-API-Console.ps1 -Cypher "MATCH (n:User {enabled:true}) RETURN n LIMIT 10"
+
+# With CSV export
+.\BHE-API-Console.ps1 -API "/api/v2/clients" -ExportCSV "clients.csv"
+
+# Custom .env location
+.\BHE-API-Console.ps1 -EnvFile "C:\creds\bhe.env" -Interactive
+
+# Override credentials via parameters
+.\BHE-API-Console.ps1 -RestEndpoint "tenant.bloodhoundenterprise.io" -TokenID "abc" -Token "xyz" -Interactive
 ```
-
-## Authentication
-
-Uses HMAC-SHA256 signed requests with the `bhesignature` header format. The 3-step signature chain covers the HTTP method, request timestamp, and body content to prevent replay attacks.
 
 ## Menu
 
@@ -49,56 +67,72 @@ API
 [Q]  Quit
 ```
 
-## Usage Modes
+## Parameters
 
-### Quick Info [0]
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `-EnvFile` | string | Path to `.env` file (default: `.env` in script directory) |
+| `-RestEndpoint` | string | BHE tenant URL (overrides `.env`) |
+| `-TokenID` | string | API Token ID (overrides `.env`) |
+| `-Token` | string | API Token Key (overrides `.env`) |
+| `-API` | string | Run a direct API endpoint call |
+| `-Method` | string | HTTP method for `-API` calls (default: GET) |
+| `-Body` | string | Request body JSON for POST/PUT calls |
+| `-Cypher` | string | Run a direct Cypher query |
+| `-Interactive` | switch | Launch the interactive console |
+| `-DebugMode` | switch | Enable verbose debug output |
+| `-ExportCSV` | string | Export results to CSV file |
 
-Runs three checks in sequence: API version, authenticated user identity, and available domains/tenants.
+## Debug Mode
 
-### Freeform Cypher [1]
+Run with `-DebugMode` to see detailed request/response information:
 
-Two input methods:
+```powershell
+.\BHE-API-Console.ps1 -Interactive -DebugMode
+```
 
-- **cypher.txt** — Place a file called `cypher.txt` in the script directory. The script auto-loads it, strips comment lines (`//` or `#`), and shows a preview before executing. Recommended for complex queries to avoid PowerShell quoting issues.
-- **Manual input** — Type or paste a query at the `CYPHER>` prompt.
+Debug output includes:
+- Full request URLs
+- Request body content and size
+- Cypher query JSON body (post Unicode-fix)
+- `[DEBUG MODE ENABLED]` banner indicator
 
-### Freeform API [3]
-
-Manually specify an HTTP method and endpoint path. Supports GET, POST, PUT, PATCH, and DELETE. POST/PUT/PATCH will prompt for a JSON request body.
-
----
-
-## Cypher Queries
-
-Pre-built Cypher queries sourced from the [SpecterOps Query Library](https://queries.specterops.io/). All queries use simple `RETURN n` or `RETURN p` patterns compatible with the BHE graph API endpoint.
-
-> **Note:** BHE's `/api/v2/graphs/cypher` returns graph data (nodes/edges). Queries using `RETURN u.name AS ...` or aggregation functions like `COUNT()` are not supported via this endpoint.
-
-**Categories:** Tier Zero, Shortest Paths, Dangerous Privileges, AD Hygiene, ADCS, NTLM Relay, Cross Platform, Domain Info, Azure
-
-### Test Queries
-
-The library includes 20 test queries designed to always return data if BHE has any collected information. Use these to validate your connection and confirm data is present before running more targeted queries.
+Debug output is suppressed by default for clean operation.
 
 ---
 
 ## API GET Queries
 
-Pre-built GET endpoints from the [BHE API Reference](https://bloodhound.specterops.io/reference/overview). All non-deprecated GET endpoints across 37 API sections. Endpoints containing `{param}` placeholders (marked with `*`) will prompt for the required value before executing.
-
-**Categories:** Auth, Permissions, Roles, API Tokens, BloodHound Users, Collectors, Collection Uploads, API Info, Search, Audit, Config, Asset Isolation, Graph, Cypher, Azure Entities, AD Base Entities, Computers, Containers, Domains, GPOs, AIA CAs, Root CAs, Enterprise CAs, NT Auth Stores, Cert Templates, OUs, AD Users, Groups, Data Quality, Datapipe, Analysis, Clients, Jobs, Events, Attack Paths, Risk Posture, Meta Entities
+162 pre-built GET endpoints across 37 categories from the [BHE API Reference](https://bloodhound.specterops.io/reference/overview). Endpoints with `{param}` placeholders prompt for input at runtime.
 
 ---
 
-## Export
+## Cypher Queries
 
-All query results can be exported to CSV or JSON. After any query runs, you are prompted with an export option.
+49 pre-built Cypher queries sourced from the [SpecterOps Query Library](https://queries.specterops.io/) across 10 categories: Tier Zero, Shortest Paths, Dangerous Privileges, AD Hygiene, ADCS, NTLM Relay, Cross Platform, Domain Info, and Azure.
+
+All queries use `RETURN n` or `RETURN p` patterns compatible with BHE's graph API endpoint.
+
+### Test Queries
+
+20 additional queries guaranteed to return results if BHE has any collected data. Use these to validate connectivity and confirm data is present before running targeted queries.
+
+---
+
+## Cypher Query Input
+
+Two methods for freeform Cypher queries (option [1]):
+
+- **cypher.txt** — Place a file in the script directory. Auto-loaded with comment stripping (`//` and `#` lines) and preview before execution. Recommended for complex queries.
+- **Manual input** — Type or paste at the `CYPHER>` prompt.
 
 ## Error Handling
 
-- **HTTP 404 on Cypher queries** — Treated as "no results" rather than an error. BHE returns 404 when a valid Cypher query matches zero nodes/edges in your environment.
-- **Authentication failures** — The script validates connectivity and auth on startup and provides troubleshooting guidance.
-- **Unicode escaping** — PowerShell's `ConvertTo-Json` Unicode-escapes characters like `'` `>` `<` which BHE rejects. The script automatically fixes these before sending.
+| Scenario | Behaviour |
+|----------|-----------|
+| HTTP 404 on Cypher | Treated as "no results" — BHE returns 404 when a query matches zero data |
+| Auth failures | Validates connectivity and auth on startup with troubleshooting guidance |
+| Unicode escaping | Auto-fixes PowerShell's `ConvertTo-Json` escaping of `'` `>` `<` `&` `+` characters |
 
 ## Files
 
