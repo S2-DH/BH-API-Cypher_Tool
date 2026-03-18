@@ -447,7 +447,7 @@ function Format-APIResult {
     $data = $Result.Data
     Write-Host ""
 
-    # ── CYPHER RESULTS (nodes/edges graph data) ──
+    # -- CYPHER RESULTS (nodes/edges graph data) --
     if ($Result.IsCypher) {
         # Unwrap nested 'data' envelope: { "data": { "nodes": {...}, "edges": {...} } }
         if ($data.data -and $data.data.PSObject -and $data.data.PSObject.Properties) {
@@ -585,7 +585,7 @@ function Format-APIResult {
             }
         }
     }
-    # ── API RESULTS (standard JSON responses) ──
+    # -- API RESULTS (standard JSON responses) --
     else {
         # Unwrap data envelope if present
         $items = $null
@@ -613,7 +613,7 @@ function Format-APIResult {
             $totalCount = $items.Count
         }
 
-        # ── Array of items: display as table ──
+        # -- Array of items: display as table --
         if ($items -and $items.Count -gt 0) {
             Write-Host "  -------------------------------------------------" -ForegroundColor DarkCyan
             Write-Host "    API Results: $($items.Count) items" -ForegroundColor Cyan
@@ -645,12 +645,27 @@ function Format-APIResult {
                 }
             }
             else {
-                # Auto-detect columns from first item (max 8 columns)
-                $sampleProps = @($items[0].PSObject.Properties | Where-Object {
-                    # Skip nested objects/arrays for table display
+                # Priority fields shown first, then remaining scalar fields (max 20 columns)
+                $priorityFields = @('name','objectid','object_id','from_principal','to_principal',
+                    'fromprincipal','toprincipal','from_principal_kind','to_principal_kind',
+                    'exposure_count','impact_count','exposure_percentage','impact_percentage',
+                    'severity','risk','finding','combo_graph_relation_id','domain_sid',
+                    'asset_group_tag_id','collected','type','enabled','created_at','updated_at')
+                $allProps = @($items[0].PSObject.Properties | Where-Object {
                     $val = $_.Value
                     -not ($val -is [PSCustomObject] -or $val -is [System.Management.Automation.PSCustomObject])
-                } | Select-Object -First 8)
+                })
+                # Sort: priority fields first (in priority order), then remaining alphabetically
+                $priorityProps = @()
+                foreach ($pf in $priorityFields) {
+                    $match = $allProps | Where-Object { $_.Name -ieq $pf } | Select-Object -First 1
+                    if ($match) { $priorityProps += $match }
+                }
+                $remainingProps = $allProps | Where-Object {
+                    $name = $_.Name
+                    -not ($priorityFields | Where-Object { $_ -ieq $name })
+                }
+                $sampleProps = @($priorityProps + $remainingProps | Select-Object -First 20)
 
                 $displayObjects = @()
 
@@ -688,7 +703,7 @@ function Format-APIResult {
                 }
             }
         }
-        # ── Single object or non-array: display as formatted JSON ──
+        # -- Single object or non-array: display as formatted JSON --
         else {
             Write-Host "  -------------------------------------------------" -ForegroundColor DarkCyan
             Write-Host "    API Response" -ForegroundColor Cyan
@@ -754,7 +769,7 @@ function Get-CypherLibrary {
     # All queries use simple RETURN n/p patterns. Complex RETURN with
     # property aliases (AS) and aggregation (COUNT) are not supported.
     return @(
-        # ── Tier Zero ──
+        # -- Tier Zero --
         @{
             Category    = "Tier Zero"
             Name        = "Kerberoastable Tier Zero Members"
@@ -786,7 +801,7 @@ function Get-CypherLibrary {
             Query       = "MATCH p=(n)-[:AllowedToDelegate]->(t:Tag_Tier_Zero) WHERE NOT ((n:Tag_Tier_Zero) OR COALESCE(n.system_tags, '') CONTAINS 'admin_tier_0') RETURN p LIMIT 100"
         },
 
-        # ── Shortest Paths ──
+        # -- Shortest Paths --
         @{
             Category    = "Shortest Paths"
             Name        = "Domain Users to Tier Zero"
@@ -806,7 +821,7 @@ function Get-CypherLibrary {
             Query       = "MATCH p=shortestPath((n {owned:true})-[*1..]->(t:Tag_Tier_Zero)) WHERE n<>t RETURN p LIMIT 50"
         },
 
-        # ── Dangerous Privileges ──
+        # -- Dangerous Privileges --
         @{
             Category    = "Dangerous Privileges"
             Name        = "Unconstrained Delegation Computers"
@@ -862,7 +877,7 @@ function Get-CypherLibrary {
             Query       = "MATCH p=(n)-[:BadSuccessor]->(m) RETURN p LIMIT 100"
         },
 
-        # ── AD Hygiene ──
+        # -- AD Hygiene --
         @{
             Category    = "AD Hygiene"
             Name        = "Reversible Encryption Users"
@@ -924,7 +939,7 @@ function Get-CypherLibrary {
             Query       = "MATCH p=()-[r:Owns|GenericAll|GenericWrite|WriteOwner|WriteDacl]->() WHERE NOT EXISTS(startNode(r).name) RETURN p LIMIT 50"
         },
 
-        # ── ADCS ──
+        # -- ADCS --
         @{
             Category    = "ADCS"
             Name        = "CA Admins (Non-T0)"
@@ -962,7 +977,7 @@ function Get-CypherLibrary {
             Query       = "MATCH (ct:CertTemplate) WHERE ct.enrollmentagent = true RETURN ct"
         },
 
-        # ── NTLM Relay ──
+        # -- NTLM Relay --
         @{
             Category    = "NTLM Relay"
             Name        = "All Coerce/Relay Edges"
@@ -976,7 +991,7 @@ function Get-CypherLibrary {
             Query       = "MATCH (u:User) WHERE ((u:Tag_Tier_Zero) OR COALESCE(u.system_tags, '') CONTAINS 'admin_tier_0') AND u.enabled = true AND NOT (u)-[:MemberOf*1..]->(:Group {name:'PROTECTED USERS@' + toUpper(SPLIT(u.name, '@')[1])}) RETURN u LIMIT 100"
         },
 
-        # ── Cross Platform ──
+        # -- Cross Platform --
         @{
             Category    = "Cross Platform"
             Name        = "Synced User Ownership"
@@ -1002,7 +1017,7 @@ function Get-CypherLibrary {
             Query       = "MATCH (d:Domain) WHERE d.lastssokeyrotation IS NOT NULL RETURN d"
         },
 
-        # ── Domain Info ──
+        # -- Domain Info --
         @{
             Category    = "Domain Info"
             Name        = "Domain Trusts"
@@ -1040,7 +1055,7 @@ function Get-CypherLibrary {
             Query       = "MATCH (c:Computer {enabled:true}) WHERE c.haslaps = false RETURN c LIMIT 200"
         },
 
-        # ── Azure ──
+        # -- Azure --
         @{
             Category    = "Azure"
             Name        = "Foreign Service Principals"
@@ -1060,7 +1075,7 @@ function Get-CypherLibrary {
             Query       = "MATCH p=(x:AZGroup)-[:AZMemberOf*2..]->(y:AZGroup) WHERE x.objectid=y.objectid RETURN p LIMIT 100"
         },
 
-        # ── Test Queries (Should Always Return Results) ──
+        # -- Test Queries (Should Always Return Results) --
         @{
             Category    = "Test Queries"
             Name        = "Any 5 Nodes"
@@ -1189,7 +1204,7 @@ function Get-APILibrary {
     # https://bloodhound.specterops.io/reference/overview
     # Endpoints with {param} will prompt for input at runtime
     return @(
-        # ── Auth ──
+        # -- Auth --
         @{ Category = "Auth"; Name = "Self (Whoami)"; Description = "Current authenticated user"; Endpoint = "/api/v2/self" },
         @{ Category = "Auth"; Name = "SAML Providers"; Description = "Configured SAML providers"; Endpoint = "/api/v2/saml" },
         @{ Category = "Auth"; Name = "All SAML Sign-On Endpoints"; Description = "SAML SSO endpoint URLs"; Endpoint = "/api/v2/saml/sso" },
@@ -1197,48 +1212,48 @@ function Get-APILibrary {
         @{ Category = "Auth"; Name = "SSO Providers"; Description = "All SSO providers"; Endpoint = "/api/v2/sso/providers" },
         @{ Category = "Auth"; Name = "SAML Signing Certificate"; Description = "SAML signing certificate"; Endpoint = "/api/v2/saml/providers/{saml_provider_id}/signing-certificate" },
 
-        # ── Permissions ──
+        # -- Permissions --
         @{ Category = "Permissions"; Name = "Permissions"; Description = "All BHE permissions"; Endpoint = "/api/v2/permissions" },
         @{ Category = "Permissions"; Name = "Permission"; Description = "Specific permission details"; Endpoint = "/api/v2/permissions/{permission_id}" },
 
-        # ── Roles ──
+        # -- Roles --
         @{ Category = "Roles"; Name = "Roles"; Description = "All BHE user roles"; Endpoint = "/api/v2/roles" },
         @{ Category = "Roles"; Name = "Role"; Description = "Specific role details"; Endpoint = "/api/v2/roles/{role_id}" },
 
-        # ── API Tokens ──
+        # -- API Tokens --
         @{ Category = "API Tokens"; Name = "Auth Tokens"; Description = "All API tokens"; Endpoint = "/api/v2/tokens" },
 
-        # ── BloodHound Users ──
+        # -- BloodHound Users --
         @{ Category = "BloodHound Users"; Name = "Users"; Description = "All BHE user accounts"; Endpoint = "/api/v2/bloodhound-users" },
         @{ Category = "BloodHound Users"; Name = "User"; Description = "Specific BHE user details"; Endpoint = "/api/v2/bloodhound-users/{user_id}" },
         @{ Category = "BloodHound Users"; Name = "User MFA Status"; Description = "MFA activation status"; Endpoint = "/api/v2/bloodhound-users/{user_id}/mfa-activation" },
 
-        # ── Collectors ──
+        # -- Collectors --
         @{ Category = "Collectors"; Name = "SharpHound Manifest"; Description = "SharpHound version manifest"; Endpoint = "/api/v2/collectors/sharphound" },
         @{ Category = "Collectors"; Name = "AzureHound Manifest"; Description = "AzureHound version manifest"; Endpoint = "/api/v2/collectors/azurehound" },
         @{ Category = "Collectors"; Name = "Kennel Enterprise Manifest"; Description = "Kennel Enterprise agent manifest"; Endpoint = "/api/v2/collectors/kennel-enterprise" },
         @{ Category = "Collectors"; Name = "Kennel Manifest"; Description = "Kennel agent manifest"; Endpoint = "/api/v2/collectors/kennel" },
 
-        # ── Collection Uploads ──
+        # -- Collection Uploads --
         @{ Category = "Collection Uploads"; Name = "File Upload Jobs"; Description = "File upload job history"; Endpoint = "/api/v2/file-upload" },
         @{ Category = "Collection Uploads"; Name = "Accepted Upload Types"; Description = "Accepted file types for upload"; Endpoint = "/api/v2/file-upload/accepted-types" },
 
-        # ── API Info ──
+        # -- API Info --
         @{ Category = "API Info"; Name = "API Version"; Description = "BHE API version"; Endpoint = "/api/version" },
         @{ Category = "API Info"; Name = "OpenAPI Spec"; Description = "Full OpenAPI 3.0 spec (YAML)"; Endpoint = "/api/v2/spec/openapi.yaml" },
 
-        # ── Search ──
+        # -- Search --
         @{ Category = "Search"; Name = "Search for Objects"; Description = "Search nodes by name"; Endpoint = "/api/v2/search?q={search_query}" },
         @{ Category = "Search"; Name = "Available Domains"; Description = "All domains/tenants collected"; Endpoint = "/api/v2/available-domains" },
 
-        # ── Audit ──
+        # -- Audit --
         @{ Category = "Audit"; Name = "Audit Logs"; Description = "Recent audit log entries"; Endpoint = "/api/v2/audit" },
 
-        # ── Config ──
+        # -- Config --
         @{ Category = "Config"; Name = "App Config"; Description = "Application configuration"; Endpoint = "/api/v2/config" },
         @{ Category = "Config"; Name = "Feature Flags"; Description = "Feature flags and status"; Endpoint = "/api/v2/features" },
 
-        # ── Asset Isolation ──
+        # -- Asset Isolation --
         @{ Category = "Asset Isolation"; Name = "All Asset Groups"; Description = "All asset isolation groups"; Endpoint = "/api/v2/asset-groups" },
         @{ Category = "Asset Isolation"; Name = "Asset Group by ID"; Description = "Specific asset group details"; Endpoint = "/api/v2/asset-groups/{asset_group_id}" },
         @{ Category = "Asset Isolation"; Name = "Asset Group Members"; Description = "Members of an asset group"; Endpoint = "/api/v2/asset-groups/{asset_group_id}/members" },
@@ -1249,7 +1264,7 @@ function Get-APILibrary {
         @{ Category = "Asset Isolation"; Name = "Asset Group History"; Description = "Historical records"; Endpoint = "/api/v2/asset-groups/{asset_group_id}/history" },
         @{ Category = "Asset Isolation"; Name = "Privilege Zone Certifications"; Description = "Certifications for privilege zones"; Endpoint = "/api/v2/asset-groups/{asset_group_id}/certifications" },
 
-        # ── Graph ──
+        # -- Graph --
         @{ Category = "Graph"; Name = "Graph Kinds"; Description = "All node and edge types"; Endpoint = "/api/v2/graphs/kinds" },
         @{ Category = "Graph"; Name = "Pathfinding"; Description = "Find paths between two nodes"; Endpoint = "/api/v2/pathfinding?start_node={start_object_id}&end_node={end_object_id}" },
         @{ Category = "Graph"; Name = "Graph Search"; Description = "Graph search by node"; Endpoint = "/api/v2/graphs/search?query={search_query}" },
@@ -1258,20 +1273,20 @@ function Get-APILibrary {
         @{ Category = "Graph"; Name = "Relay Targets"; Description = "NTLM relay targets for a source"; Endpoint = "/api/v2/graphs/relay-targets?source_node={source_object_id}" },
         @{ Category = "Graph"; Name = "ACL Inheritance Path"; Description = "ACL inheritance chain"; Endpoint = "/api/v2/graphs/acl-inheritance?object_id={object_id}" },
 
-        # ── Cypher (Saved Queries) ──
+        # -- Cypher (Saved Queries) --
         @{ Category = "Cypher"; Name = "Saved Queries"; Description = "All saved Cypher queries"; Endpoint = "/api/v2/saved-queries" },
         @{ Category = "Cypher"; Name = "Export Saved Query"; Description = "Export a specific saved query"; Endpoint = "/api/v2/saved-queries/{saved_query_id}/export" },
         @{ Category = "Cypher"; Name = "Export All Saved Queries"; Description = "Export all saved queries"; Endpoint = "/api/v2/saved-queries/export" },
 
-        # ── Azure Entities ──
+        # -- Azure Entities --
         @{ Category = "Azure Entities"; Name = "Azure Entity"; Description = "Azure/Entra entity info"; Endpoint = "/api/v2/azure/{entity_type}" },
 
-        # ── AD Base Entities ──
+        # -- AD Base Entities --
         @{ Category = "AD Base Entities"; Name = "Entity Info"; Description = "Any AD entity by object ID"; Endpoint = "/api/v2/base/{object_id}" },
         @{ Category = "AD Base Entities"; Name = "Entity Controllables"; Description = "Objects this entity can control"; Endpoint = "/api/v2/base/{object_id}/controllables" },
         @{ Category = "AD Base Entities"; Name = "Entity Controllers"; Description = "Objects that control this entity"; Endpoint = "/api/v2/base/{object_id}/controllers" },
 
-        # ── Computers ──
+        # -- Computers --
         @{ Category = "Computers"; Name = "Computer Info"; Description = "Computer entity details"; Endpoint = "/api/v2/computers/{object_id}" },
         @{ Category = "Computers"; Name = "Computer Admin Rights"; Description = "Systems this computer admins"; Endpoint = "/api/v2/computers/{object_id}/admin-rights" },
         @{ Category = "Computers"; Name = "Computer Admins"; Description = "Admins on this computer"; Endpoint = "/api/v2/computers/{object_id}/admins" },
@@ -1289,11 +1304,11 @@ function Get-APILibrary {
         @{ Category = "Computers"; Name = "Computer Sessions"; Description = "Sessions on this computer"; Endpoint = "/api/v2/computers/{object_id}/sessions" },
         @{ Category = "Computers"; Name = "Computer SQL Admins"; Description = "SQL admins on this computer"; Endpoint = "/api/v2/computers/{object_id}/sql-admins" },
 
-        # ── Containers ──
+        # -- Containers --
         @{ Category = "Containers"; Name = "Container Info"; Description = "Container entity details"; Endpoint = "/api/v2/containers/{object_id}" },
         @{ Category = "Containers"; Name = "Container Controllers"; Description = "Controllers of this container"; Endpoint = "/api/v2/containers/{object_id}/controllers" },
 
-        # ── Domains ──
+        # -- Domains --
         @{ Category = "Domains"; Name = "Domain Info"; Description = "Domain entity details"; Endpoint = "/api/v2/domains/{object_id}" },
         @{ Category = "Domains"; Name = "Domain Computers"; Description = "Computers in domain"; Endpoint = "/api/v2/domains/{object_id}/computers" },
         @{ Category = "Domains"; Name = "Domain Controllers"; Description = "Principals controlling domain"; Endpoint = "/api/v2/domains/{object_id}/controllers" },
@@ -1311,7 +1326,7 @@ function Get-APILibrary {
         @{ Category = "Domains"; Name = "Domain Users"; Description = "Users in domain"; Endpoint = "/api/v2/domains/{object_id}/users" },
         @{ Category = "Domains"; Name = "Domain ADCS Escalations"; Description = "ADCS escalation paths"; Endpoint = "/api/v2/domains/{object_id}/adcs" },
 
-        # ── GPOs ──
+        # -- GPOs --
         @{ Category = "GPOs"; Name = "GPO Info"; Description = "GPO entity details"; Endpoint = "/api/v2/gpos/{object_id}" },
         @{ Category = "GPOs"; Name = "GPO Computers"; Description = "Computers affected by GPO"; Endpoint = "/api/v2/gpos/{object_id}/computers" },
         @{ Category = "GPOs"; Name = "GPO Controllers"; Description = "Principals controlling GPO"; Endpoint = "/api/v2/gpos/{object_id}/controllers" },
@@ -1319,40 +1334,40 @@ function Get-APILibrary {
         @{ Category = "GPOs"; Name = "GPO Tier Zero"; Description = "T0 assets affected by GPO"; Endpoint = "/api/v2/gpos/{object_id}/tier-zero" },
         @{ Category = "GPOs"; Name = "GPO Users"; Description = "Users affected by GPO"; Endpoint = "/api/v2/gpos/{object_id}/users" },
 
-        # ── AIA CAs ──
+        # -- AIA CAs --
         @{ Category = "AIA CAs"; Name = "AIA CA Info"; Description = "AIA CA entity details"; Endpoint = "/api/v2/aia-cas/{object_id}" },
         @{ Category = "AIA CAs"; Name = "AIA CA Controllers"; Description = "Controllers of this AIA CA"; Endpoint = "/api/v2/aia-cas/{object_id}/controllers" },
         @{ Category = "AIA CAs"; Name = "AIA CA PKI Hierarchy"; Description = "PKI hierarchy"; Endpoint = "/api/v2/aia-cas/{object_id}/pki-hierarchy" },
 
-        # ── Root CAs ──
+        # -- Root CAs --
         @{ Category = "Root CAs"; Name = "Root CA Info"; Description = "Root CA entity details"; Endpoint = "/api/v2/root-cas/{object_id}" },
         @{ Category = "Root CAs"; Name = "Root CA Controllers"; Description = "Controllers of Root CA"; Endpoint = "/api/v2/root-cas/{object_id}/controllers" },
         @{ Category = "Root CAs"; Name = "Root CA PKI Hierarchy"; Description = "PKI hierarchy"; Endpoint = "/api/v2/root-cas/{object_id}/pki-hierarchy" },
 
-        # ── Enterprise CAs ──
+        # -- Enterprise CAs --
         @{ Category = "Enterprise CAs"; Name = "Enterprise CA Info"; Description = "Enterprise CA details"; Endpoint = "/api/v2/enterprise-cas/{object_id}" },
         @{ Category = "Enterprise CAs"; Name = "Enterprise CA Controllers"; Description = "Controllers of Enterprise CA"; Endpoint = "/api/v2/enterprise-cas/{object_id}/controllers" },
         @{ Category = "Enterprise CAs"; Name = "Enterprise CA PKI Hierarchy"; Description = "PKI hierarchy"; Endpoint = "/api/v2/enterprise-cas/{object_id}/pki-hierarchy" },
         @{ Category = "Enterprise CAs"; Name = "Enterprise CA Published Templates"; Description = "Published cert templates"; Endpoint = "/api/v2/enterprise-cas/{object_id}/published-certificate-templates" },
 
-        # ── NT Auth Stores ──
+        # -- NT Auth Stores --
         @{ Category = "NT Auth Stores"; Name = "NT Auth Store Info"; Description = "NT Auth Store details"; Endpoint = "/api/v2/nt-auth-stores/{object_id}" },
         @{ Category = "NT Auth Stores"; Name = "NT Auth Store Controllers"; Description = "Controllers"; Endpoint = "/api/v2/nt-auth-stores/{object_id}/controllers" },
         @{ Category = "NT Auth Stores"; Name = "NT Auth Store Trusted CAs"; Description = "Trusted Enterprise CAs"; Endpoint = "/api/v2/nt-auth-stores/{object_id}/trusted-enterprise-cas" },
 
-        # ── Cert Templates ──
+        # -- Cert Templates --
         @{ Category = "Cert Templates"; Name = "Cert Template Info"; Description = "Cert template details"; Endpoint = "/api/v2/cert-templates/{object_id}" },
         @{ Category = "Cert Templates"; Name = "Cert Template Controllers"; Description = "Controllers"; Endpoint = "/api/v2/cert-templates/{object_id}/controllers" },
         @{ Category = "Cert Templates"; Name = "Cert Template Publishing CAs"; Description = "CAs publishing this template"; Endpoint = "/api/v2/cert-templates/{object_id}/enterprise-cas" },
 
-        # ── OUs ──
+        # -- OUs --
         @{ Category = "OUs"; Name = "OU Info"; Description = "OU entity details"; Endpoint = "/api/v2/ous/{object_id}" },
         @{ Category = "OUs"; Name = "OU Computers"; Description = "Computers in OU"; Endpoint = "/api/v2/ous/{object_id}/computers" },
         @{ Category = "OUs"; Name = "OU GPOs"; Description = "GPOs linked to OU"; Endpoint = "/api/v2/ous/{object_id}/gpos" },
         @{ Category = "OUs"; Name = "OU Groups"; Description = "Groups in OU"; Endpoint = "/api/v2/ous/{object_id}/groups" },
         @{ Category = "OUs"; Name = "OU Users"; Description = "Users in OU"; Endpoint = "/api/v2/ous/{object_id}/users" },
 
-        # ── AD Users ──
+        # -- AD Users --
         @{ Category = "AD Users"; Name = "User Info"; Description = "AD User details"; Endpoint = "/api/v2/users/{object_id}" },
         @{ Category = "AD Users"; Name = "User Admin Rights"; Description = "Systems user admins"; Endpoint = "/api/v2/users/{object_id}/admin-rights" },
         @{ Category = "AD Users"; Name = "User Constrained Delegation"; Description = "Constrained delegation"; Endpoint = "/api/v2/users/{object_id}/constrained-delegation-rights" },
@@ -1365,7 +1380,7 @@ function Get-APILibrary {
         @{ Category = "AD Users"; Name = "User Sessions"; Description = "Active sessions"; Endpoint = "/api/v2/users/{object_id}/sessions" },
         @{ Category = "AD Users"; Name = "User SQL Admin Rights"; Description = "SQL admin rights"; Endpoint = "/api/v2/users/{object_id}/sql-admin-rights" },
 
-        # ── Groups ──
+        # -- Groups --
         @{ Category = "Groups"; Name = "Group Info"; Description = "AD Group details"; Endpoint = "/api/v2/groups/{object_id}" },
         @{ Category = "Groups"; Name = "Group Admin Rights"; Description = "Systems group admins"; Endpoint = "/api/v2/groups/{object_id}/admin-rights" },
         @{ Category = "Groups"; Name = "Group Controllables"; Description = "Objects group controls"; Endpoint = "/api/v2/groups/{object_id}/controllables" },
@@ -1377,27 +1392,27 @@ function Get-APILibrary {
         @{ Category = "Groups"; Name = "Group RDP Rights"; Description = "RDP rights"; Endpoint = "/api/v2/groups/{object_id}/rdp-rights" },
         @{ Category = "Groups"; Name = "Group Sessions"; Description = "Member sessions"; Endpoint = "/api/v2/groups/{object_id}/sessions" },
 
-        # ── Data Quality ──
+        # -- Data Quality --
         @{ Category = "Data Quality"; Name = "Database Completeness Stats"; Description = "Overall completeness"; Endpoint = "/api/v2/completeness" },
         @{ Category = "Data Quality"; Name = "AD Domain Data Quality"; Description = "Domain data quality stats"; Endpoint = "/api/v2/ad-domains/{domain_id}/data-quality-stats" },
         @{ Category = "Data Quality"; Name = "Azure Tenant Data Quality"; Description = "Tenant data quality stats"; Endpoint = "/api/v2/azure-tenants/{tenant_id}/data-quality-stats" },
         @{ Category = "Data Quality"; Name = "Platform Data Quality"; Description = "Aggregate quality stats"; Endpoint = "/api/v2/platform/{platform_id}/data-quality-stats" },
 
-        # ── Datapipe ──
+        # -- Datapipe --
         @{ Category = "Datapipe"; Name = "Datapipe Status"; Description = "Analysis pipeline status"; Endpoint = "/api/v2/datapipe/status" },
 
-        # ── Analysis ──
+        # -- Analysis --
         @{ Category = "Analysis"; Name = "Tier Zero Combo Node"; Description = "Latest T0 composite node"; Endpoint = "/api/v2/meta-nodes/{domain_id}" },
         @{ Category = "Analysis"; Name = "Meta Tree Graph"; Description = "Meta tree visualization"; Endpoint = "/api/v2/meta-trees/{domain_id}" },
         @{ Category = "Analysis"; Name = "Asset Group Combo Tree"; Description = "Combo tree for asset group"; Endpoint = "/api/v2/asset-groups/{asset_group_id}/combo-node" },
 
-        # ── Clients ──
+        # -- Clients --
         @{ Category = "Clients"; Name = "Clients"; Description = "Registered collectors"; Endpoint = "/api/v2/clients" },
         @{ Category = "Clients"; Name = "Client"; Description = "Specific client details"; Endpoint = "/api/v2/clients/{client_id}" },
         @{ Category = "Clients"; Name = "Client Completed Tasks"; Description = "Completed tasks for client"; Endpoint = "/api/v2/clients/{client_id}/completed-tasks" },
         @{ Category = "Clients"; Name = "Client Completed Jobs"; Description = "Completed jobs for client"; Endpoint = "/api/v2/clients/{client_id}/completed-jobs" },
 
-        # ── Jobs ──
+        # -- Jobs --
         @{ Category = "Jobs"; Name = "Available Jobs"; Description = "Available client jobs"; Endpoint = "/api/v2/jobs/available" },
         @{ Category = "Jobs"; Name = "Finished Jobs"; Description = "Completed job history"; Endpoint = "/api/v2/jobs/finished" },
         @{ Category = "Jobs"; Name = "Jobs"; Description = "All jobs with status"; Endpoint = "/api/v2/jobs" },
@@ -1405,11 +1420,11 @@ function Get-APILibrary {
         @{ Category = "Jobs"; Name = "Job Details"; Description = "Specific job details"; Endpoint = "/api/v2/jobs/{job_id}" },
         @{ Category = "Jobs"; Name = "Job Log File"; Description = "Log for a specific job"; Endpoint = "/api/v2/jobs/{job_id}/log" },
 
-        # ── Events (Schedules) ──
+        # -- Events (Schedules) --
         @{ Category = "Events"; Name = "Events"; Description = "Scheduled collection events"; Endpoint = "/api/v2/events" },
         @{ Category = "Events"; Name = "Event"; Description = "Specific event details"; Endpoint = "/api/v2/events/{event_id}" },
 
-        # ── Attack Paths ──
+        # -- Attack Paths --
         @{ Category = "Attack Paths"; Name = "Export All Findings"; Description = "Export all attack path findings"; Endpoint = "/api/v2/attack-paths/details" },
         @{ Category = "Attack Paths"; Name = "All Findings"; Description = "All findings summary"; Endpoint = "/api/v2/attack-paths" },
         @{ Category = "Attack Paths"; Name = "Attack Path Types"; Description = "All 120 finding type strings"; Endpoint = "/api/v2/attack-path-types" },
@@ -1417,20 +1432,17 @@ function Get-APILibrary {
         @{ Category = "Attack Paths"; Name = "Domain Path Details"; Description = "Path details for domain"; Endpoint = "/api/v2/domains/{domain_id}/attack-path-findings" },
 
 
-        # ── Risk Posture ──
+        # -- Risk Posture --
         @{ Category = "Risk Posture"; Name = "Posture Statistics"; Description = "Overall risk posture"; Endpoint = "/api/v2/posture-stats" },
         @{ Category = "Risk Posture"; Name = "Posture History"; Description = "Historical posture data"; Endpoint = "/api/v2/posture-history" },
 
-        # ── Meta Entities ──
+        # -- Meta Entities --
         @{ Category = "Meta Entities"; Name = "Meta Entity Info"; Description = "Meta entity details"; Endpoint = "/api/v2/meta/{object_id}" },
 
-        # ── Findings ──
-        @{ Category = "Findings"; Name = "Active Finding Types (by Domain)"; Description = "Finding types with actual data in this domain"; Endpoint = "/api/v2/domains/{domain_id}/available-types?asset_group_tag_id=1" },
-        @{ Category = "Findings"; Name = "Finding Details (by Domain)"; Description = "Principals affected by a finding - current state"; Endpoint = "/api/v2/domains/{domain_id}/details?finding={finding_type}&skip=0&limit=25&sort_by=-exposure_percentage&asset_group_tag_id=1&Accepted=eq%3Afalse" },
-        @{ Category = "Findings"; Name = "Finding Sparkline (by Domain)"; Description = "Trend data for a finding over time"; Endpoint = "/api/v2/domains/{domain_id}/attack-paths/sparkline?finding={finding_type}&asset_group_tag_id=1&from={from_date (e.g. 2026-01-01T00:00:00Z)}&to={to_date (e.g. 2026-03-18T00:00:00Z)}" },
-        @{ Category = "Findings"; Name = "Finding Trends (Remediation)"; Description = "Resolved finding counts over a period - measures remediation"; Endpoint = "/api/v2/attack-paths/finding-trends?domain_id={domain_id}&finding={finding_type}&from={from_date (e.g. 2026-01-01T00:00:00Z)}&to={to_date (e.g. 2026-03-18T00:00:00Z)}" },
-
-        # ── Finding Summary (special - chained call) ──
+        # -- Findings --
+        @{ Category = "Findings"; Name = "Active Finding Types (by Domain)"; Description = "** Chains available-types + details: lists active finding types with counts and friendly names."; Endpoint = "SPECIAL:ActiveFindingTypes" },
+        @{ Category = "Findings"; Name = "Finding Details (by Domain)"; Description = "Principals affected by a finding - current state"; Endpoint = "SPECIAL:FindingDetails" },
+        # -- Finding Summary (special - chained call) --
         @{ Category = "Findings"; Name = "Finding Summary (All + Counts)"; Description = "** Chains available-types + details: lists all active findings with counts, sorted by severity. Includes friendly display names."; Endpoint = "SPECIAL:FindingSummary" }
     )
 }
@@ -1447,7 +1459,7 @@ function Show-CypherLibrary {
     )
 
     while ($true) {
-        $categories = $Library | Group-Object { $_.Category } | Sort-Object Name
+        $categories = $Library | Group-Object { $_.Category } | Sort-Object { if ($_.Name -eq "Findings") { "ZZZZZ" } else { $_.Name } }
 
         Write-Host ""
         Write-Host "  -- Cypher Query Library ------------------------------------" -ForegroundColor DarkCyan
@@ -1487,14 +1499,14 @@ function Show-CypherLibrary {
             Format-APIResult -Result $result
 
             Write-Host ""
-            $exportChoice = Read-Host "  Export to CSV? (enter file path or press Enter to skip)"
+            $exportChoice = Read-Host "  Export to CSV? File path or blank to skip"
             if (-not [string]::IsNullOrWhiteSpace($exportChoice)) {
                 Format-APIResult -Result $result -ExportPath $exportChoice
             }
 
             Write-Host ""
             Write-Host "  Press Enter to return to library..." -ForegroundColor DarkGray
-            Read-Host | Out-Null
+            $null = Read-Host
         }
         else {
             Write-Host "  [!] Invalid selection." -ForegroundColor Red
@@ -1505,6 +1517,295 @@ function Show-CypherLibrary {
 # ============================================================================
 # API LIBRARY BROWSER
 # ============================================================================
+# ============================================================================
+# FINDING DETAILS (formatted display - resolves SIDs to names where possible)
+# ============================================================================
+function Invoke-FindingDetails {
+    param(
+        [string]$BaseUrl,
+        [string]$TokenId,
+        [string]$TokenKey
+    )
+
+    Write-Host ""
+    Write-Host "  -- Finding Details ----------------------------------------------" -ForegroundColor DarkCyan
+    Write-Host ""
+
+    $domainId = (Read-Host "  domain_id").Trim()
+    if ([string]::IsNullOrWhiteSpace($domainId)) { return }
+
+    $tagId = (Read-Host "  asset_group_tag_id  1=TierZero  blank=1").Trim()
+    if ([string]::IsNullOrWhiteSpace($tagId)) { $tagId = "1" }
+
+    # Show domain-scoped finding picker
+    Write-Host ""
+    Write-Host "  [*] Fetching active finding types for this domain..." -ForegroundColor DarkGray
+    $typesResult = Invoke-BHERequest -BaseUrl $BaseUrl `
+        -Endpoint "/api/v2/domains/$domainId/available-types?asset_group_tag_id=$tagId" `
+        -TokenId $TokenId -TokenKey $TokenKey -Silent
+
+    $ftFriendly = @{
+        'NonT0DCSyncers'='Non-Tier Zero Principals With DCSync Privileges'
+        'T0AllExtendedRights'='AllExtendedRights on Objects in Privilege Zone'
+        'T0CoerceToTGT'='Non-Tier Zero Principal Trusted for Unconstrained Delegation'
+        'T0GenericAll'='GenericAll Privileges on Objects in Privilege Zone'
+        'T0GenericWrite'='GenericWrite Privileges on Objects in Privilege Zone'
+        'T0GPLink'='Non-Certified GPO Linked to Privilege Zone OU'
+        'T0Logins'='Logons From Users in Privilege Zone'
+        'T0MarkSensitive'='Tier Zero Objects Lack Kerberos Delegation Protection'
+        'T0MemberOf'='Non-Certified Principal with Privileges in Privilege Zone'
+        'T0Owns'='Ownership of Objects in Privilege Zone'
+        'T0WriteDACL'='WriteDacl Privileges on Objects in Privilege Zone'
+        'T0WriteOwner'='WriteOwner Privileges on Objects in Privilege Zone'
+        'T0Admins'='Admin Privileges on Tier Zero Systems'
+        'T0ReadLAPS'='ReadLAPS Password on Tier Zero System'
+        'T0ReadGMSA'='ReadGMSA Password for Tier Zero Account'
+    }
+
+    $findingTypes = @()
+    if ($typesResult.Success) {
+        $td = $typesResult.Data
+        if ($td.data) { $findingTypes = $td.data }
+        elseif ($td -is [System.Array]) { $findingTypes = $td }
+    }
+
+    if ($findingTypes.Count -gt 0) {
+        Write-Host ""
+        Write-Host "  Active Finding Types ($($findingTypes.Count)):" -ForegroundColor Yellow
+        $ftCounter = 0
+        foreach ($ft in $findingTypes) {
+            $ftCounter++
+            $ftName = if ($ftFriendly.ContainsKey($ft)) { $ftFriendly[$ft] } else { $ft }
+            Write-Host "  " -NoNewline
+            Write-Host "$ftCounter".PadLeft(4) -ForegroundColor DarkGray -NoNewline
+            Write-Host "  $($ft.PadRight(28))" -ForegroundColor Green -NoNewline
+            Write-Host "  $ftName" -ForegroundColor DarkGray
+        }
+        Write-Host ""
+        $ftPick = (Read-Host "  Pick number or type name").Trim()
+        $ftPickNum = 0
+        if ([int]::TryParse($ftPick, [ref]$ftPickNum) -and $ftPickNum -ge 1 -and $ftPickNum -le $findingTypes.Count) {
+            $findingType = $findingTypes[$ftPickNum - 1]
+        } else {
+            $findingType = $ftPick
+        }
+    } else {
+        $findingType = (Read-Host "  finding_type").Trim()
+    }
+
+    $limitStr = (Read-Host "  Max results  blank=25").Trim()
+    $limit = if ([string]::IsNullOrWhiteSpace($limitStr)) { 25 } else { [int]$limitStr }
+
+    Write-Host ""
+    $endpoint = '/api/v2/domains/' + $domainId + '/details?finding=' + $findingType + '&skip=0&limit=' + $limit + '&sort_by=-exposure_percentage&sort_by=-exposure_count&asset_group_tag_id=' + $tagId + '&Accepted=eq%3Afalse'
+    $result = Invoke-BHERequest -BaseUrl $BaseUrl -Endpoint $endpoint `
+        -TokenId $TokenId -TokenKey $TokenKey
+
+    if (-not $result.Success) { return }
+
+    $d = $result.Data
+    $items = $null
+    if     ($d.findings -is [System.Array]) { $items = $d.findings }
+    elseif ($d.data     -is [System.Array]) { $items = $d.data }
+    elseif ($d          -is [System.Array]) { $items = $d }
+
+    if (-not $items -or $items.Count -eq 0) {
+        Write-Host "  [*] No findings returned." -ForegroundColor DarkYellow
+        return
+    }
+
+    $friendlyName = if ($ftFriendly.ContainsKey($findingType)) { $ftFriendly[$findingType] } else { $findingType }
+
+    Write-Host "  -------------------------------------------------" -ForegroundColor DarkCyan
+    Write-Host "    $friendlyName" -ForegroundColor Cyan
+    Write-Host "    $($items.Count) findings  |  Domain: $domainId" -ForegroundColor DarkGray
+    Write-Host "  -------------------------------------------------" -ForegroundColor DarkCyan
+    Write-Host ""
+
+    # Helper to shorten SIDs/GUIDs to last segment for display
+    function Shorten-ID($id) {
+        if ([string]::IsNullOrWhiteSpace($id)) { return "" }
+        return $id
+    }
+
+    $displayObjects = @()
+    $counter = 0
+    foreach ($item in $items) {
+        $counter++
+        $fromShort = Shorten-ID $item.FromPrincipal
+        $toShort   = Shorten-ID $item.ToPrincipal
+        $fromKind  = if ($item.FromPrincipalKind) { $item.FromPrincipalKind } else { "" }
+        $toKind    = if ($item.ToPrincipalKind)   { $item.ToPrincipalKind }   else { "" }
+        $severity  = if ($item.Severity)          { $item.Severity }          else { "" }
+        $exposure  = if ($item.ExposureCount)     { $item.ExposureCount }     elseif ($item.exposure_count) { $item.exposure_count } else { "" }
+        $impact    = if ($item.ImpactCount)       { $item.ImpactCount }       elseif ($item.impact_count)   { $item.impact_count }   else { "" }
+        $createdAt = if ($item.created_at)        { $item.created_at.ToString().Substring(0,10) } else { "" }
+
+        $displayObjects += [PSCustomObject]@{
+            '#'        = $counter
+            Severity   = $severity
+            Exposure   = $exposure
+            Impact     = $impact
+            FromType   = $fromKind
+            From       = $fromShort
+            ToType     = $toKind
+            To         = $toShort
+            Since      = $createdAt
+        }
+    }
+
+    $displayObjects | Format-Table -AutoSize | Out-String | Write-Host
+
+    Write-Host ""
+    $exportChoice = Read-Host "  Export to CSV? File path or blank to skip"
+    if (-not [string]::IsNullOrWhiteSpace($exportChoice)) {
+        Export-Results -Objects $displayObjects -Path $exportChoice
+    }
+    Write-Host ""
+    Write-Host "  Press any key to return to library..." -ForegroundColor DarkGray
+    $null = Read-Host
+}
+
+# ============================================================================
+# ACTIVE FINDING TYPES (chained: available-types + count per type)
+# ============================================================================
+function Invoke-ActiveFindingTypes {
+    param(
+        [string]$BaseUrl,
+        [string]$TokenId,
+        [string]$TokenKey
+    )
+
+    $ftFriendly = @{
+        'ASREPRoasting'               = 'AS-REP Roastable Users'
+        'Kerberoasting'               = 'Kerberoastable Users'
+        'NonT0DCSyncers'              = 'Non-Tier Zero Principals With DCSync Privileges'
+        'T0AllExtendedRights'         = 'AllExtendedRights Privileges on Objects in Privilege Zone'
+        'T0AllowedToDelegate'         = 'Non-Tier Zero Principal Trusted for Constrained Delegation'
+        'T0CoerceToTGT'               = 'Non-Tier Zero Principal Trusted for Unconstrained Delegation'
+        'T0DCOM'                      = 'DCOM Privileges on Tier Zero Systems'
+        'T0ForceChangePassword'       = 'ForceChangePassword Privileges on Tier Zero'
+        'T0GenericAll'                = 'GenericAll Privileges on Objects in Privilege Zone'
+        'T0GenericWrite'              = 'GenericWrite Privileges on Objects in Privilege Zone'
+        'T0GoldenCert'                = 'Golden Certificate Attack Path to Tier Zero'
+        'T0GPLink'                    = 'Non-Certified GPO Linked to Privilege Zone OU'
+        'T0HasSIDHistory'             = 'SID History Linking to Tier Zero'
+        'T0Logins'                    = 'Logons From Users in Privilege Zone'
+        'T0ManageCA'                  = 'ManageCA Privileges on Certificate Authority'
+        'T0ManageCertificates'        = 'ManageCertificates Privileges on Certificate Authority'
+        'T0MarkSensitive'             = 'Tier Zero Objects Lack Kerberos Delegation Protection'
+        'T0MemberOf'                  = 'Non-Certified Principal with Privileges in Privilege Zone'
+        'T0Owns'                      = 'Ownership of Objects in Privilege Zone'
+        'T0PSRemote'                  = 'PSRemote Privileges on Tier Zero Systems'
+        'T0RDP'                       = 'RDP Privileges on Tier Zero Systems'
+        'T0ReadGMSA'                  = 'ReadGMSA Password for Tier Zero Account'
+        'T0ReadLAPS'                  = 'ReadLAPS Password on Tier Zero System'
+        'T0SQLAdmin'                  = 'SQL Admin Privileges on Tier Zero Systems'
+        'T0SyncedToADUser'            = 'Entra User Synced to Tier Zero AD Account'
+        'T0WriteAccountRestrictions'  = 'WriteAccountRestrictions Privileges on Tier Zero'
+        'T0WriteDACL'                 = 'WriteDacl Privileges on Objects in Privilege Zone'
+        'T0WriteGPLink'               = 'WriteGPLink Privileges on Tier Zero OU'
+        'T0WriteOwner'                = 'WriteOwner Privileges on Objects in Privilege Zone'
+        'T0WriteSPN'                  = 'WriteSPN Privileges on Tier Zero Account'
+        'T0ADCSESC1'                  = 'ADCS ESC1 Path to Tier Zero'
+        'T0ADCSESC3'                  = 'ADCS ESC3 Path to Tier Zero'
+        'T0ADCSESC4'                  = 'ADCS ESC4 Path to Tier Zero'
+        'T0ADCSESC6a'                 = 'ADCS ESC6a Path to Tier Zero'
+        'T0ADCSESC6b'                 = 'ADCS ESC6b Path to Tier Zero'
+        'T0ADCSESC9a'                 = 'ADCS ESC9a Path to Tier Zero'
+        'T0ADCSESC9b'                 = 'ADCS ESC9b Path to Tier Zero'
+        'T0ADCSESC10a'                = 'ADCS ESC10a Path to Tier Zero'
+        'T0ADCSESC10b'                = 'ADCS ESC10b Path to Tier Zero'
+        'T0ADCSESC13'                 = 'ADCS ESC13 Path to Tier Zero'
+    }
+
+    Write-Host ""
+    Write-Host "  -- Active Finding Types ----------------------------------------" -ForegroundColor DarkCyan
+    Write-Host ""
+
+    $domainId = (Read-Host "  domain_id").Trim()
+    if ([string]::IsNullOrWhiteSpace($domainId)) { return }
+
+    $tagId = (Read-Host "  asset_group_tag_id  1=TierZero 3=TierOne  blank=1").Trim()
+    if ([string]::IsNullOrWhiteSpace($tagId)) { $tagId = "1" }
+
+    Write-Host ""
+    Write-Host "  [*] Fetching active finding types..." -ForegroundColor DarkGray
+    $typesResult = Invoke-BHERequest -BaseUrl $BaseUrl `
+        -Endpoint "/api/v2/domains/$domainId/available-types?asset_group_tag_id=$tagId" `
+        -TokenId $TokenId -TokenKey $TokenKey -Silent
+
+    if (-not $typesResult.Success) {
+        Write-Host "  [!] Failed to retrieve finding types." -ForegroundColor Red
+        return
+    }
+
+    $typesData = $typesResult.Data
+    if ($typesData.data) { $findingTypes = $typesData.data }
+    elseif ($typesData -is [System.Array]) { $findingTypes = $typesData }
+    else { $findingTypes = @() }
+
+    if ($findingTypes.Count -eq 0) {
+        Write-Host "  [!] No active finding types found." -ForegroundColor Yellow
+        return
+    }
+
+    Write-Host "  [+] Found $($findingTypes.Count) active finding types -- fetching counts..." -ForegroundColor Green
+    Write-Host ""
+
+    $results = @()
+    $counter = 0
+    foreach ($ft in $findingTypes) {
+        $counter++
+        $displayName = if ($ftFriendly.ContainsKey($ft)) { $ftFriendly[$ft] } else { $ft }
+        $detailsResult = Invoke-BHERequest -BaseUrl $BaseUrl `
+            -Endpoint ('/api/v2/domains/' + $domainId + '/details?finding=' + $ft + '&skip=0&limit=1000&asset_group_tag_id=' + $tagId + '&Accepted=eq%3Afalse') `
+            -TokenId $TokenId -TokenKey $TokenKey -Silent
+
+        $count = 0
+        if ($detailsResult.Success) {
+            $d = $detailsResult.Data
+            if     ($d.count -and $d.count -gt 0)         { $count = $d.count }
+            elseif ($d.findings -is [System.Array])        { $count = $d.findings.Count }
+            elseif ($d.data    -is [System.Array])         { $count = $d.data.Count }
+            elseif ($d         -is [System.Array])         { $count = $d.Count }
+        }
+        $results += [PSCustomObject]@{
+            '#'          = $counter
+            Count        = $count
+            FindingType  = $ft
+            DisplayName  = $displayName
+        }
+    }
+
+    $sorted = $results | Sort-Object { [int]$_.Count } -Descending
+    $rank = 0
+    $ranked = $sorted | ForEach-Object {
+        $rank++
+        [PSCustomObject]@{
+            '#'          = $rank
+            Count        = $_.Count
+            FindingType  = $_.FindingType
+            DisplayName  = $_.DisplayName
+        }
+    }
+
+    Write-Host "  -------------------------------------------------" -ForegroundColor DarkCyan
+    Write-Host "    Active Finding Types: $domainId" -ForegroundColor Cyan
+    Write-Host "  -------------------------------------------------" -ForegroundColor DarkCyan
+    Write-Host ""
+    $ranked | Format-Table -AutoSize | Out-String | Write-Host
+
+    Write-Host ""
+    $exportChoice = Read-Host "  Export to CSV? File path or blank to skip"
+    if (-not [string]::IsNullOrWhiteSpace($exportChoice)) {
+        Export-Results -Objects $ranked -Path $exportChoice
+    }
+    Write-Host ""
+    Write-Host "  Press any key to return to library..." -ForegroundColor DarkGray
+    $null = Read-Host
+}
+
 # ============================================================================
 # FINDING SUMMARY (chained: available-types -> details count per finding)
 # ============================================================================
@@ -1579,10 +1880,10 @@ function Invoke-FindingSummary {
     Write-Host "  the finding count for each one, sorted by count descending." -ForegroundColor DarkGray
     Write-Host ""
 
-    $domainId = (Read-Host "  Enter domain_id (e.g. S-1-5-21-...)").Trim()
+    $domainId = (Read-Host "  domain_id").Trim()
     if ([string]::IsNullOrWhiteSpace($domainId)) { return }
 
-    $tagId = (Read-Host "  Enter asset_group_tag_id (default: 1  |  1=Tier Zero, 3=Tier One)").Trim()
+    $tagId = (Read-Host "  asset_group_tag_id  1=TierZero 3=TierOne  blank=1").Trim()
     if ([string]::IsNullOrWhiteSpace($tagId)) { $tagId = "1" }
 
     # Step 1: Get active finding types
@@ -1609,7 +1910,7 @@ function Invoke-FindingSummary {
 
     Write-Host "  [+] Found $($findingTypes.Count) active finding types" -ForegroundColor Green
 
-    # Hygiene-only findings — no attack path relationships, count via different response key
+    # Hygiene-only findings -- no attack path relationships, count via different response key
     $hygieneFindings = @('T0MarkSensitive')
 
     # Step 2: Fetch count + exposure/impact for each finding type
@@ -1620,26 +1921,22 @@ function Invoke-FindingSummary {
     $counter = 0
     foreach ($findingType in $findingTypes) {
         $counter++
-        $displayName  = if ($friendlyNames.ContainsKey($findingType)) { $friendlyNames[$findingType] } else { $findingType }
+        $displayName  = if ($friendlyNames -and $friendlyNames.ContainsKey($findingType)) { $friendlyNames[$findingType] } else { $findingType }
         $isHygiene    = $hygieneFindings -contains $findingType
         $note         = if ($isHygiene) { "Hygiene check - no direct attack path" } else { "" }
 
         Write-Host "  [$counter/$($findingTypes.Count)] $findingType" -ForegroundColor DarkGray -NoNewline
 
         $detailsResult = Invoke-BHERequest -BaseUrl $BaseUrl `
-            -Endpoint "/api/v2/domains/$domainId/details?finding=$findingType&skip=0&limit=1000&sort_by=-exposure_percentage&sort_by=-exposure_count&sort_by=-impact_percentage&sort_by=-impact_count&asset_group_tag_id=$tagId&Accepted=eq%3Afalse" `
+            -Endpoint ('/api/v2/domains/' + $domainId + '/details?finding=' + $findingType + '&skip=0&limit=1000&sort_by=-exposure_percentage&sort_by=-exposure_count&asset_group_tag_id=' + $tagId + '&Accepted=eq%3Afalse') `
             -TokenId $TokenId -TokenKey $TokenKey -Silent
 
         $findingCount      = 0
-        $exposurePct       = ""
-        $impactPct         = ""
-        $criticalCount     = 0
-        $highCount         = 0
 
         if ($detailsResult.Success) {
             $detailsData = $detailsResult.Data
 
-            # Extract items array — try all known response envelope shapes
+            # Extract items array -- try all known response envelope shapes
             $items = $null
             if ($detailsData.count -and $detailsData.count -gt 0) {
                 $findingCount = $detailsData.count
@@ -1654,20 +1951,9 @@ function Invoke-FindingSummary {
 
             if ($items -and $items.Count -gt 0) {
                 if ($findingCount -eq 0) { $findingCount = $items.Count }
-
-                # Pull exposure/impact from first item (sorted by -exposure_percentage)
-                $firstItem = $items[0]
-                if ($firstItem.exposure_percentage)  { $exposurePct   = "$([math]::Round($firstItem.exposure_percentage, 1))%" }
-                if ($firstItem.impact_percentage)    { $impactPct     = "$([math]::Round($firstItem.impact_percentage, 1))%" }
-
-                # Count Critical / High severity items if severity field present
-                foreach ($item in $items) {
-                    if ($item.severity -eq 'critical' -or $item.risk -eq 'critical') { $criticalCount++ }
-                    if ($item.severity -eq 'high'     -or $item.risk -eq 'high')     { $highCount++ }
-                }
             }
 
-            # Hygiene findings: try the exposure_percentage from the finding_assets metadata
+            # Hygiene findings: try the finding_assets metadata for count
             if ($isHygiene -and $detailsData.finding_assets) {
                 $fa = $detailsData.finding_assets
                 if ($fa.$findingType) {
@@ -1685,10 +1971,6 @@ function Invoke-FindingSummary {
             FindingType   = $findingType
             DisplayName   = $displayName
             Count         = $findingCount
-            ExposurePct   = $exposurePct
-            ImpactPct     = $impactPct
-            Critical      = if ($criticalCount -gt 0) { $criticalCount } else { "" }
-            High          = if ($highCount -gt 0)     { $highCount }     else { "" }
             Note          = $note
         }
     }
@@ -1704,10 +1986,6 @@ function Invoke-FindingSummary {
         $ranked += [PSCustomObject]@{
             '#'           = $rank
             Count         = $item.Count
-            ExposurePct   = $item.ExposurePct
-            ImpactPct     = $item.ImpactPct
-            Critical      = $item.Critical
-            High          = $item.High
             FindingType   = $item.FindingType
             DisplayName   = $item.DisplayName
             Note          = $item.Note
@@ -1725,14 +2003,14 @@ function Invoke-FindingSummary {
     $ranked | Format-Table -AutoSize | Out-String | Write-Host
 
     Write-Host ""
-    $exportChoice = Read-Host "  Export to CSV? (enter file path or press Enter to skip)"
+    $exportChoice = Read-Host "  Export to CSV? File path or blank to skip"
     if (-not [string]::IsNullOrWhiteSpace($exportChoice)) {
         Export-Results -Objects $ranked -Path $exportChoice
     }
 
     Write-Host ""
-    Write-Host "  Press Enter to return to library..." -ForegroundColor DarkGray
-    Read-Host | Out-Null
+    Write-Host "  Press any key to return to library..." -ForegroundColor DarkGray
+    $null = Read-Host
 }
 
 function Show-APILibrary {
@@ -1744,7 +2022,7 @@ function Show-APILibrary {
     )
 
     while ($true) {
-        $categories = $Library | Group-Object { $_.Category } | Sort-Object Name
+        $categories = $Library | Group-Object { $_.Category } | Sort-Object { if ($_.Name -eq "Findings") { "ZZZZZ" } else { $_.Name } }
 
         Write-Host ""
         Write-Host "  -- API Endpoint Library ------------------------------------" -ForegroundColor DarkCyan
@@ -1788,6 +2066,18 @@ function Show-APILibrary {
             $selected = $queryMap[$pickNum]
             $endpoint = $selected.Endpoint
 
+            # Special handler - Finding Details formatted display
+            if ($endpoint -eq 'SPECIAL:FindingDetails') {
+                Invoke-FindingDetails -BaseUrl $BaseUrl -TokenId $TokenId -TokenKey $TokenKey
+                continue
+            }
+
+            # Special handler - Active Finding Types chained call
+            if ($endpoint -eq 'SPECIAL:ActiveFindingTypes') {
+                Invoke-ActiveFindingTypes -BaseUrl $BaseUrl -TokenId $TokenId -TokenKey $TokenKey
+                continue
+            }
+
             # Special handler - Finding Summary chained call
             if ($endpoint -eq 'SPECIAL:FindingSummary') {
                 Invoke-FindingSummary -BaseUrl $BaseUrl -TokenId $TokenId -TokenKey $TokenKey
@@ -1796,6 +2086,7 @@ function Show-APILibrary {
 
             # Check for {param} placeholders and prompt
             $paramMatches = [regex]::Matches($endpoint, '\{([^}]+)\}')
+            $collectedParams = @{}  # track entered values (e.g. domain_id) for use in later params
             if ($paramMatches.Count -gt 0) {
                 Write-Host ""
                 Write-Host "  This endpoint requires parameters:" -ForegroundColor Yellow
@@ -1805,21 +2096,87 @@ function Show-APILibrary {
                     # Auto-fetch finding types when finding_type param is encountered
                     if ($paramName -match '^finding_type') {
                         Write-Host ""
-                        Write-Host "  [*] Fetching available finding types..." -ForegroundColor DarkGray
-                        $ftResult = Invoke-BHERequest -BaseUrl $BaseUrl -Endpoint "/api/v2/attack-path-types" `
+                        # Use domain-specific available-types if we already have domain_id
+                        $ftEndpoint = "/api/v2/attack-path-types"
+                        $ftLabel    = "All 120 finding types"
+                        if ($collectedParams.ContainsKey('domain_id') -and -not [string]::IsNullOrWhiteSpace($collectedParams['domain_id'])) {
+                            $ftEndpoint = "/api/v2/domains/$($collectedParams['domain_id'])/available-types?asset_group_tag_id=1"
+                            $ftLabel    = "Active finding types for this domain"
+                        }
+                        Write-Host "  [*] Fetching $ftLabel..." -ForegroundColor DarkGray
+                        $ftResult = Invoke-BHERequest -BaseUrl $BaseUrl -Endpoint $ftEndpoint `
                             -TokenId $TokenId -TokenKey $TokenKey -Silent
                         if ($ftResult.Success) {
                             $ftData = $ftResult.Data
                             if ($ftData.data) { $ftItems = $ftData.data } elseif ($ftData -is [System.Array]) { $ftItems = $ftData }
                             if ($ftItems) {
+                                # Friendly display name map
+                                $ftFriendly = @{
+                                    'ASREPRoasting'               = 'AS-REP Roastable Users'
+                                    'Kerberoasting'               = 'Kerberoastable Users'
+                                    'NonT0DCSyncers'              = 'Non-Tier Zero Principals With DCSync Privileges'
+                                    'T0AddAllowedToAct'           = 'AddAllowedToAct Privileges on Tier Zero'
+                                    'T0AddKeyCredentialLink'      = 'AddKeyCredentialLink Privileges on Tier Zero'
+                                    'T0AddMember'                 = 'AddMember Privileges on Tier Zero'
+                                    'T0AddSelf'                   = 'AddSelf Privileges on Tier Zero'
+                                    'T0Admins'                    = 'Admin Privileges on Tier Zero Systems'
+                                    'T0AllExtendedRights'         = 'AllExtendedRights Privileges on Objects in Privilege Zone'
+                                    'T0AllowedToAct'              = 'AllowedToAct Privileges on Tier Zero'
+                                    'T0AllowedToDelegate'         = 'Non-Tier Zero Principal Trusted for Constrained Delegation'
+                                    'T0CoerceAndRelayNTLMToADCS'  = 'NTLM Coerce and Relay to ADCS Targeting Tier Zero'
+                                    'T0CoerceAndRelayNTLMToLDAP'  = 'NTLM Coerce and Relay to LDAP Targeting Tier Zero'
+                                    'T0CoerceAndRelayNTLMToLDAPS' = 'NTLM Coerce and Relay to LDAPS Targeting Tier Zero'
+                                    'T0CoerceAndRelayNTLMToSMB'   = 'NTLM Coerce and Relay to SMB Targeting Tier Zero'
+                                    'T0CoerceToTGT'               = 'Non-Tier Zero Principal Trusted for Unconstrained Delegation'
+                                    'T0DCOM'                      = 'DCOM Privileges on Tier Zero Systems'
+                                    'T0DumpSMSA'                  = 'DumpSMSA Privileges on Tier Zero'
+                                    'T0ForceChangePassword'       = 'ForceChangePassword Privileges on Tier Zero'
+                                    'T0GenericAll'                = 'GenericAll Privileges on Objects in Privilege Zone'
+                                    'T0GenericWrite'              = 'GenericWrite Privileges on Objects in Privilege Zone'
+                                    'T0GoldenCert'                = 'Golden Certificate Attack Path to Tier Zero'
+                                    'T0GPLink'                    = 'Non-Certified GPO Linked to Privilege Zone OU'
+                                    'T0HasSIDHistory'             = 'SID History Linking to Tier Zero'
+                                    'T0Logins'                    = 'Logons From Users in Privilege Zone'
+                                    'T0ManageCA'                  = 'ManageCA Privileges on Certificate Authority'
+                                    'T0ManageCertificates'        = 'ManageCertificates Privileges on Certificate Authority'
+                                    'T0MarkSensitive'             = 'Tier Zero Objects Lack Kerberos Delegation Protection'
+                                    'T0MemberOf'                  = 'Non-Certified Principal with Privileges in Privilege Zone'
+                                    'T0Owns'                      = 'Ownership of Objects in Privilege Zone'
+                                    'T0OwnsLimitedRights'         = 'Owns (Limited Rights) on Tier Zero Objects'
+                                    'T0PSRemote'                  = 'PSRemote Privileges on Tier Zero Systems'
+                                    'T0RDP'                       = 'RDP Privileges on Tier Zero Systems'
+                                    'T0ReadGMSA'                  = 'ReadGMSA Password for Tier Zero Account'
+                                    'T0ReadLAPS'                  = 'ReadLAPS Password on Tier Zero System'
+                                    'T0SQLAdmin'                  = 'SQL Admin Privileges on Tier Zero Systems'
+                                    'T0SyncedToADUser'            = 'Entra User Synced to Tier Zero AD Account'
+                                    'T0SyncLAPSPassword'          = 'SyncLAPSPassword Privileges on Tier Zero'
+                                    'T0WriteAccountRestrictions'  = 'WriteAccountRestrictions Privileges on Tier Zero'
+                                    'T0WriteDACL'                 = 'WriteDacl Privileges on Objects in Privilege Zone'
+                                    'T0WriteGPLink'               = 'WriteGPLink Privileges on Tier Zero OU'
+                                    'T0WriteOwner'                = 'WriteOwner Privileges on Objects in Privilege Zone'
+                                    'T0WriteOwnerLimitedRights'   = 'WriteOwner (Limited Rights) on Tier Zero Objects'
+                                    'T0WriteSPN'                  = 'WriteSPN Privileges on Tier Zero Account'
+                                    'T0ADCSESC1'                  = 'ADCS ESC1 Path to Tier Zero'
+                                    'T0ADCSESC3'                  = 'ADCS ESC3 Path to Tier Zero'
+                                    'T0ADCSESC4'                  = 'ADCS ESC4 Path to Tier Zero'
+                                    'T0ADCSESC6a'                 = 'ADCS ESC6a Path to Tier Zero'
+                                    'T0ADCSESC6b'                 = 'ADCS ESC6b Path to Tier Zero'
+                                    'T0ADCSESC9a'                 = 'ADCS ESC9a Path to Tier Zero'
+                                    'T0ADCSESC9b'                 = 'ADCS ESC9b Path to Tier Zero'
+                                    'T0ADCSESC10a'                = 'ADCS ESC10a Path to Tier Zero'
+                                    'T0ADCSESC10b'                = 'ADCS ESC10b Path to Tier Zero'
+                                    'T0ADCSESC13'                 = 'ADCS ESC13 Path to Tier Zero'
+                                }
                                 Write-Host ""
-                                Write-Host "  Available Finding Types:" -ForegroundColor Yellow
+                                Write-Host "  $ftLabel ($($ftItems.Count) types):" -ForegroundColor Yellow
                                 $ftCounter = 0
                                 foreach ($ft in $ftItems) {
                                     $ftCounter++
+                                    $ftName = if ($ftFriendly.ContainsKey($ft)) { $ftFriendly[$ft] } else { $ft }
                                     Write-Host "  " -NoNewline
                                     Write-Host "$ftCounter".PadLeft(4) -ForegroundColor DarkGray -NoNewline
-                                    Write-Host "  $ft" -ForegroundColor Green
+                                    Write-Host "  $($ft.PadRight(28))" -ForegroundColor Green -NoNewline
+                                    Write-Host "  $ftName" -ForegroundColor DarkGray
                                 }
                                 Write-Host ""
                                 Write-Host "  Enter number to select, or type the finding name directly:" -ForegroundColor DarkGray
@@ -1827,19 +2184,22 @@ function Show-APILibrary {
                                 $ftPickNum = 0
                                 if ([int]::TryParse($ftPick, [ref]$ftPickNum) -and $ftPickNum -ge 1 -and $ftPickNum -le $ftItems.Count) {
                                     $paramValue = $ftItems[$ftPickNum - 1]
-                                    Write-Host "  Selected: $paramValue" -ForegroundColor Cyan
+                                    $ftSelectedName = if ($ftFriendly.ContainsKey($paramValue)) { $ftFriendly[$paramValue] } else { $paramValue }
+                                    Write-Host "  Selected: $paramValue  ($ftSelectedName)" -ForegroundColor Cyan
                                 } else {
                                     $paramValue = $ftPick
                                 }
                             } else {
-                                $paramValue = (Read-Host "  Enter $paramName").Trim()
+                                $paramValue = (Read-Host "  $paramName").Trim()
                             }
                         } else {
                             Write-Host "  [!] Could not fetch finding types - enter manually" -ForegroundColor Yellow
-                            $paramValue = (Read-Host "  Enter $paramName").Trim()
+                            $paramValue = (Read-Host "  $paramName").Trim()
                         }
                     } else {
-                        $paramValue = (Read-Host "  Enter $paramName").Trim()
+                        $paramValue = (Read-Host "  $paramName").Trim()
+                        # Track domain_id for use in finding_type lookup
+                        if ($paramName -eq 'domain_id') { $collectedParams['domain_id'] = $paramValue }
                     }
 
                     if ([string]::IsNullOrWhiteSpace($paramValue)) {
@@ -1860,14 +2220,14 @@ function Show-APILibrary {
                 Format-APIResult -Result $result
 
                 Write-Host ""
-                $exportChoice = Read-Host "  Export to CSV? (enter file path or press Enter to skip)"
+                $exportChoice = Read-Host "  Export to CSV? File path or blank to skip"
                 if (-not [string]::IsNullOrWhiteSpace($exportChoice)) {
                     Format-APIResult -Result $result -ExportPath $exportChoice
                 }
 
                 Write-Host ""
                 Write-Host "  Press Enter to return to library..." -ForegroundColor DarkGray
-                Read-Host | Out-Null
+                $null = Read-Host
             }
         }
         else {
@@ -2037,7 +2397,7 @@ function Start-InteractiveConsole {
                 Format-APIResult -Result $result
 
                 Write-Host ""
-                $exportChoice = Read-Host "  Export to CSV? (enter file path or press Enter to skip)"
+                $exportChoice = Read-Host "  Export to CSV? File path or blank to skip"
                 if (-not [string]::IsNullOrWhiteSpace($exportChoice)) {
                     Format-APIResult -Result $result -ExportPath $exportChoice
                 }
@@ -2079,7 +2439,7 @@ function Start-InteractiveConsole {
                 Format-APIResult -Result $result
 
                 Write-Host ""
-                $exportChoice = Read-Host "  Export to CSV? (enter file path or press Enter to skip)"
+                $exportChoice = Read-Host "  Export to CSV? File path or blank to skip"
                 if (-not [string]::IsNullOrWhiteSpace($exportChoice)) {
                     Format-APIResult -Result $result -ExportPath $exportChoice
                 }
@@ -2172,7 +2532,7 @@ function Test-Authentication {
 
 Show-Banner
 
-# ── Load .env file ──
+# -- Load .env file --
 $envVars = @{}
 
 if ($EnvFile) {
@@ -2202,7 +2562,7 @@ else {
     }
 }
 
-# ── Resolve credentials (params override .env) ──
+# -- Resolve credentials (params override .env) --
 if (-not $RestEndpoint -and $envVars.ContainsKey('BHE_URL')) {
     $RestEndpoint = $envVars['BHE_URL']
 }
@@ -2213,7 +2573,7 @@ if (-not $Token -and $envVars.ContainsKey('BHE_API_KEY')) {
     $Token = $envVars['BHE_API_KEY']
 }
 
-# ── Validate we have all required credentials ──
+# -- Validate we have all required credentials --
 $missing = @()
 if ([string]::IsNullOrWhiteSpace($RestEndpoint)) { $missing += 'BHE_URL / -RestEndpoint' }
 if ([string]::IsNullOrWhiteSpace($TokenID))      { $missing += 'BHE_API_ID / -TokenID' }
@@ -2238,7 +2598,7 @@ if ($missing.Count -gt 0) {
 
 $BaseUrl = Normalize-Url -Url $RestEndpoint
 
-# ── Always run auth test first ──
+# -- Always run auth test first --
 $authSuccess = Test-Authentication -BaseUrl $BaseUrl -TokenId $TokenID -TokenKey $Token
 
 if (-not $authSuccess) {
@@ -2248,7 +2608,7 @@ if (-not $authSuccess) {
     exit 1
 }
 
-# ── Route based on mode ──
+# -- Route based on mode --
 if ($API) {
     # Direct API Call
     Write-Host "  -- Direct API Call -----------------------------------------" -ForegroundColor DarkCyan
