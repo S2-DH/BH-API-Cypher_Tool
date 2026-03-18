@@ -1412,18 +1412,23 @@ function Get-APILibrary {
         # ── Attack Paths ──
         @{ Category = "Attack Paths"; Name = "Export All Findings"; Description = "Export all attack path findings"; Endpoint = "/api/v2/attack-paths/details" },
         @{ Category = "Attack Paths"; Name = "All Findings"; Description = "All findings summary"; Endpoint = "/api/v2/attack-paths" },
-        @{ Category = "Attack Paths"; Name = "Attack Path Types"; Description = "Available attack path types"; Endpoint = "/api/v2/attack-path-types" },
+        @{ Category = "Attack Paths"; Name = "Attack Path Types"; Description = "All 120 finding type strings"; Endpoint = "/api/v2/attack-path-types" },
         @{ Category = "Attack Paths"; Name = "Domain Available Paths"; Description = "Available paths for domain"; Endpoint = "/api/v2/domains/{domain_id}/available-attack-paths" },
         @{ Category = "Attack Paths"; Name = "Domain Path Details"; Description = "Path details for domain"; Endpoint = "/api/v2/domains/{domain_id}/attack-path-findings" },
-        @{ Category = "Attack Paths"; Name = "Attack Path Sparklines"; Description = "Trend sparkline data"; Endpoint = "/api/v2/domains/{domain_id}/sparkline" },
-        @{ Category = "Attack Paths"; Name = "Finding Trends"; Description = "Historical finding trends"; Endpoint = "/api/v2/attack-paths/finding-trends" },
+
 
         # ── Risk Posture ──
         @{ Category = "Risk Posture"; Name = "Posture Statistics"; Description = "Overall risk posture"; Endpoint = "/api/v2/posture-stats" },
         @{ Category = "Risk Posture"; Name = "Posture History"; Description = "Historical posture data"; Endpoint = "/api/v2/posture-history" },
 
         # ── Meta Entities ──
-        @{ Category = "Meta Entities"; Name = "Meta Entity Info"; Description = "Meta entity details"; Endpoint = "/api/v2/meta/{object_id}" }
+        @{ Category = "Meta Entities"; Name = "Meta Entity Info"; Description = "Meta entity details"; Endpoint = "/api/v2/meta/{object_id}" },
+
+        # ── Findings ──
+        @{ Category = "Findings"; Name = "Active Finding Types (by Domain)"; Description = "Finding types with actual data in this domain"; Endpoint = "/api/v2/domains/{domain_id}/available-types?asset_group_tag_id=1" },
+        @{ Category = "Findings"; Name = "Finding Details (by Domain)"; Description = "Principals affected by a finding - current state"; Endpoint = "/api/v2/domains/{domain_id}/details?finding={finding_type}&skip=0&limit=25&sort_by=-exposure_percentage&asset_group_tag_id=1&Accepted=eq%3Afalse" },
+        @{ Category = "Findings"; Name = "Finding Sparkline (by Domain)"; Description = "Trend data for a finding over time"; Endpoint = "/api/v2/domains/{domain_id}/attack-paths/sparkline?finding={finding_type}&asset_group_tag_id=1&from={from_date (e.g. 2026-01-01T00:00:00Z)}&to={to_date (e.g. 2026-03-18T00:00:00Z)}" },
+        @{ Category = "Findings"; Name = "Finding Trends (Remediation)"; Description = "Resolved finding counts over a period - measures remediation"; Endpoint = "/api/v2/attack-paths/finding-trends?domain_id={domain_id}&finding={finding_type}&from={from_date (e.g. 2026-01-01T00:00:00Z)}&to={to_date (e.g. 2026-03-18T00:00:00Z)}" }
     )
 }
 
@@ -1557,7 +1562,47 @@ function Show-APILibrary {
                 Write-Host "  This endpoint requires parameters:" -ForegroundColor Yellow
                 foreach ($m in $paramMatches) {
                     $paramName = $m.Groups[1].Value
-                    $paramValue = Read-Host "  Enter $paramName"
+
+                    # Auto-fetch finding types when finding_type param is encountered
+                    if ($paramName -match '^finding_type') {
+                        Write-Host ""
+                        Write-Host "  [*] Fetching available finding types..." -ForegroundColor DarkGray
+                        $ftResult = Invoke-BHERequest -BaseUrl $BaseUrl -Endpoint "/api/v2/attack-path-types" `
+                            -TokenId $TokenId -TokenKey $TokenKey -Silent
+                        if ($ftResult.Success) {
+                            $ftData = $ftResult.Data
+                            if ($ftData.data) { $ftItems = $ftData.data } elseif ($ftData -is [System.Array]) { $ftItems = $ftData }
+                            if ($ftItems) {
+                                Write-Host ""
+                                Write-Host "  Available Finding Types:" -ForegroundColor Yellow
+                                $ftCounter = 0
+                                foreach ($ft in $ftItems) {
+                                    $ftCounter++
+                                    Write-Host "  " -NoNewline
+                                    Write-Host "$ftCounter".PadLeft(4) -ForegroundColor DarkGray -NoNewline
+                                    Write-Host "  $ft" -ForegroundColor Green
+                                }
+                                Write-Host ""
+                                Write-Host "  Enter number to select, or type the finding name directly:" -ForegroundColor DarkGray
+                                $ftPick = (Read-Host "  $paramName").Trim()
+                                $ftPickNum = 0
+                                if ([int]::TryParse($ftPick, [ref]$ftPickNum) -and $ftPickNum -ge 1 -and $ftPickNum -le $ftItems.Count) {
+                                    $paramValue = $ftItems[$ftPickNum - 1]
+                                    Write-Host "  Selected: $paramValue" -ForegroundColor Cyan
+                                } else {
+                                    $paramValue = $ftPick
+                                }
+                            } else {
+                                $paramValue = (Read-Host "  Enter $paramName").Trim()
+                            }
+                        } else {
+                            Write-Host "  [!] Could not fetch finding types - enter manually" -ForegroundColor Yellow
+                            $paramValue = (Read-Host "  Enter $paramName").Trim()
+                        }
+                    } else {
+                        $paramValue = (Read-Host "  Enter $paramName").Trim()
+                    }
+
                     if ([string]::IsNullOrWhiteSpace($paramValue)) {
                         Write-Host "  [!] Cancelled - parameter required." -ForegroundColor Red
                         $endpoint = $null
