@@ -1,7 +1,7 @@
 #!/usr/bin/env pwsh
 <#
 .SYNOPSIS
-    BHE API Console - Authentication Test + Interactive Query Console
+    BHE API Console - Authentication Test + Interactive Query Console v1.4
 
 .DESCRIPTION
     Tests BHE HMAC authentication and provides an interactive console for running
@@ -137,7 +137,7 @@ function Show-Banner {
     Write-Host ""
     Write-Host "  ======================================================" -ForegroundColor Cyan
     Write-Host "                                                        " -ForegroundColor Cyan
-    Write-Host "           BHE API Console v1.3                         " -ForegroundColor Cyan
+    Write-Host "           BHE API Console v1.4                         " -ForegroundColor Cyan
     Write-Host "           Authentication + Query Engine                 " -ForegroundColor Cyan
     Write-Host "                                                        " -ForegroundColor Cyan
     Write-Host "  ======================================================" -ForegroundColor Cyan
@@ -623,46 +623,69 @@ function Format-APIResult {
             Write-Host "  -------------------------------------------------" -ForegroundColor DarkCyan
             Write-Host ""
 
-            # Auto-detect columns from first item (max 8 columns)
-            $sampleProps = @($items[0].PSObject.Properties | Where-Object {
-                # Skip nested objects/arrays for table display
-                $val = $_.Value
-                -not ($val -is [PSCustomObject] -or $val -is [System.Management.Automation.PSCustomObject])
-            } | Select-Object -First 8)
+            # Check if items are primitives (e.g. flat string array like /api/v2/attack-path-types)
+            $firstItem = $items[0]
+            $isPrimitive = ($firstItem -is [string] -or $firstItem -is [int] -or
+                            $firstItem -is [long] -or $firstItem -is [double] -or
+                            $firstItem -is [bool])
 
-            $displayObjects = @()
-
-            $counter = 0
-            foreach ($item in $items) {
-                $counter++
-                if ($counter -gt 100) {
-                    Write-Host "  ... $($items.Count) total, showing first 100" -ForegroundColor DarkGray
-                    break
+            if ($isPrimitive) {
+                # Display as a simple numbered list - no truncation for primitives
+                $counter = 0
+                $displayObjects = @()
+                foreach ($item in $items) {
+                    $counter++
+                    Write-Host "  " -NoNewline
+                    Write-Host "$counter".PadLeft(3) -ForegroundColor DarkGray -NoNewline
+                    Write-Host "  $item" -ForegroundColor Green
+                    $displayObjects += [PSCustomObject]@{ '#' = $counter; Value = $item }
                 }
-
-                $obj = [ordered]@{ '#' = $counter }
-                foreach ($prop in $sampleProps) {
-                    $val = $item.($prop.Name)
-                    if ($null -eq $val) { $val = "" }
-                    elseif ($val -is [System.Array]) {
-                        $val = ($val | ForEach-Object { $_.ToString() }) -join ", "
-                    }
-                    elseif ($val -is [PSCustomObject]) {
-                        $val = "(object)"
-                    }
-                    # Truncate long strings for table display
-                    $valStr = $val.ToString()
-                    if ($valStr.Length -gt 60) { $valStr = $valStr.Substring(0, 57) + "..." }
-                    $obj[$prop.Name] = $valStr
+                if ($ExportPath) {
+                    Export-Results -Objects $displayObjects -Path $ExportPath
                 }
-                $displayObjects += [PSCustomObject]$obj
             }
+            else {
+                # Auto-detect columns from first item (max 8 columns)
+                $sampleProps = @($items[0].PSObject.Properties | Where-Object {
+                    # Skip nested objects/arrays for table display
+                    $val = $_.Value
+                    -not ($val -is [PSCustomObject] -or $val -is [System.Management.Automation.PSCustomObject])
+                } | Select-Object -First 8)
 
-            # Table display
-            $displayObjects | Format-Table -AutoSize -Wrap | Out-String | Write-Host
+                $displayObjects = @()
 
-            if ($ExportPath) {
-                Export-Results -Objects $displayObjects -Path $ExportPath
+                $counter = 0
+                foreach ($item in $items) {
+                    $counter++
+                    if ($counter -gt 100) {
+                        Write-Host "  ... $($items.Count) total, showing first 100" -ForegroundColor DarkGray
+                        break
+                    }
+
+                    $obj = [ordered]@{ '#' = $counter }
+                    foreach ($prop in $sampleProps) {
+                        $val = $item.($prop.Name)
+                        if ($null -eq $val) { $val = "" }
+                        elseif ($val -is [System.Array]) {
+                            $val = ($val | ForEach-Object { $_.ToString() }) -join ", "
+                        }
+                        elseif ($val -is [PSCustomObject]) {
+                            $val = "(object)"
+                        }
+                        # Truncate long strings for table display
+                        $valStr = $val.ToString()
+                        if ($valStr.Length -gt 60) { $valStr = $valStr.Substring(0, 57) + "..." }
+                        $obj[$prop.Name] = $valStr
+                    }
+                    $displayObjects += [PSCustomObject]$obj
+                }
+
+                # Table display
+                $displayObjects | Format-Table -AutoSize -Wrap | Out-String | Write-Host
+
+                if ($ExportPath) {
+                    Export-Results -Objects $displayObjects -Path $ExportPath
+                }
             }
         }
         # ── Single object or non-array: display as formatted JSON ──
@@ -1745,11 +1768,11 @@ function Start-InteractiveConsole {
                 # Freeform API
                 Write-Host ""
                 Write-Host "  HTTP Method [GET/POST/PUT/DELETE] (default: GET):" -ForegroundColor Yellow
-                $apiMethod = Read-Host "  METHOD>"
+                $apiMethod = (Read-Host "  METHOD>").Trim()
                 if ([string]::IsNullOrWhiteSpace($apiMethod)) { $apiMethod = "GET" }
 
                 Write-Host "  Enter API endpoint (e.g., /api/v2/available-domains):" -ForegroundColor Yellow
-                $endpoint = Read-Host "  API>"
+                $endpoint = (Read-Host "  API>").Trim()
 
                 if ($endpoint -eq 'back' -or [string]::IsNullOrWhiteSpace($endpoint)) { continue }
 
