@@ -1428,7 +1428,10 @@ function Get-APILibrary {
         @{ Category = "Findings"; Name = "Active Finding Types (by Domain)"; Description = "Finding types with actual data in this domain"; Endpoint = "/api/v2/domains/{domain_id}/available-types?asset_group_tag_id=1" },
         @{ Category = "Findings"; Name = "Finding Details (by Domain)"; Description = "Principals affected by a finding - current state"; Endpoint = "/api/v2/domains/{domain_id}/details?finding={finding_type}&skip=0&limit=25&sort_by=-exposure_percentage&asset_group_tag_id=1&Accepted=eq%3Afalse" },
         @{ Category = "Findings"; Name = "Finding Sparkline (by Domain)"; Description = "Trend data for a finding over time"; Endpoint = "/api/v2/domains/{domain_id}/attack-paths/sparkline?finding={finding_type}&asset_group_tag_id=1&from={from_date (e.g. 2026-01-01T00:00:00Z)}&to={to_date (e.g. 2026-03-18T00:00:00Z)}" },
-        @{ Category = "Findings"; Name = "Finding Trends (Remediation)"; Description = "Resolved finding counts over a period - measures remediation"; Endpoint = "/api/v2/attack-paths/finding-trends?domain_id={domain_id}&finding={finding_type}&from={from_date (e.g. 2026-01-01T00:00:00Z)}&to={to_date (e.g. 2026-03-18T00:00:00Z)}" }
+        @{ Category = "Findings"; Name = "Finding Trends (Remediation)"; Description = "Resolved finding counts over a period - measures remediation"; Endpoint = "/api/v2/attack-paths/finding-trends?domain_id={domain_id}&finding={finding_type}&from={from_date (e.g. 2026-01-01T00:00:00Z)}&to={to_date (e.g. 2026-03-18T00:00:00Z)}" },
+
+        # ── Finding Summary (special - chained call) ──
+        @{ Category = "Findings"; Name = "Finding Summary (All + Counts)"; Description = "** Chains available-types + details: lists all active findings with counts, sorted by severity. Includes friendly display names."; Endpoint = "SPECIAL:FindingSummary" }
     )
 }
 
@@ -1502,6 +1505,236 @@ function Show-CypherLibrary {
 # ============================================================================
 # API LIBRARY BROWSER
 # ============================================================================
+# ============================================================================
+# FINDING SUMMARY (chained: available-types -> details count per finding)
+# ============================================================================
+function Invoke-FindingSummary {
+    param(
+        [string]$BaseUrl,
+        [string]$TokenId,
+        [string]$TokenKey
+    )
+
+    # Friendly display names mapped from API finding type strings
+    $friendlyNames = @{
+        'ASREPRoasting'                    = 'AS-REP Roastable Users'
+        'Kerberoasting'                    = 'Kerberoastable Users'
+        'NonT0DCSyncers'                   = 'Non-Tier Zero Principals With DCSync Privileges'
+        'T0AddAllowedToAct'                = 'AddAllowedToAct Privileges on Tier Zero'
+        'T0AddKeyCredentialLink'           = 'AddKeyCredentialLink Privileges on Tier Zero'
+        'T0AddMember'                      = 'AddMember Privileges on Tier Zero'
+        'T0AddSelf'                        = 'AddSelf Privileges on Tier Zero'
+        'T0Admins'                         = 'Admin Privileges on Tier Zero Systems'
+        'T0AllExtendedRights'              = 'AllExtendedRights Privileges on Objects in Privilege Zone'
+        'T0AllowedToAct'                   = 'AllowedToAct Privileges on Tier Zero'
+        'T0AllowedToDelegate'              = 'Non-Tier Zero Principal Trusted for Constrained Delegation'
+        'T0CoerceAndRelayNTLMToADCS'       = 'NTLM Coerce and Relay to ADCS Targeting Tier Zero'
+        'T0CoerceAndRelayNTLMToLDAP'       = 'NTLM Coerce and Relay to LDAP Targeting Tier Zero'
+        'T0CoerceAndRelayNTLMToLDAPS'      = 'NTLM Coerce and Relay to LDAPS Targeting Tier Zero'
+        'T0CoerceAndRelayNTLMToSMB'        = 'NTLM Coerce and Relay to SMB Targeting Tier Zero'
+        'T0CoerceToTGT'                    = 'Non-Tier Zero Principal Trusted for Unconstrained Delegation'
+        'T0DCOM'                           = 'DCOM Privileges on Tier Zero Systems'
+        'T0DumpSMSA'                       = 'DumpSMSA Privileges on Tier Zero'
+        'T0ForceChangePassword'            = 'ForceChangePassword Privileges on Tier Zero'
+        'T0GenericAll'                     = 'GenericAll Privileges on Objects in Privilege Zone'
+        'T0GenericWrite'                   = 'GenericWrite Privileges on Objects in Privilege Zone'
+        'T0GoldenCert'                     = 'Golden Certificate Attack Path to Tier Zero'
+        'T0GPLink'                         = 'Non-Certified GPO Linked to Privilege Zone OU'
+        'T0HasSIDHistory'                  = 'SID History Linking to Tier Zero'
+        'T0Logins'                         = 'Logons From Users in Privilege Zone'
+        'T0ManageCA'                       = 'ManageCA Privileges on Certificate Authority'
+        'T0ManageCertificates'             = 'ManageCertificates Privileges on Certificate Authority'
+        'T0MarkSensitive'                  = 'Tier Zero Objects Lack Kerberos Delegation Protection'
+        'T0MemberOf'                       = 'Non-Certified Principal with Privileges in Privilege Zone'
+        'T0Owns'                           = 'Ownership of Objects in Privilege Zone'
+        'T0OwnsLimitedRights'              = 'Owns (Limited Rights) on Tier Zero Objects'
+        'T0PSRemote'                       = 'PSRemote Privileges on Tier Zero Systems'
+        'T0RDP'                            = 'RDP Privileges on Tier Zero Systems'
+        'T0ReadGMSA'                       = 'ReadGMSA Password for Tier Zero Account'
+        'T0ReadLAPS'                       = 'ReadLAPS Password on Tier Zero System'
+        'T0SQLAdmin'                       = 'SQL Admin Privileges on Tier Zero Systems'
+        'T0SyncedToADUser'                 = 'Entra User Synced to Tier Zero AD Account'
+        'T0SyncLAPSPassword'               = 'SyncLAPSPassword Privileges on Tier Zero'
+        'T0WriteAccountRestrictions'       = 'WriteAccountRestrictions Privileges on Tier Zero'
+        'T0WriteDACL'                      = 'WriteDacl Privileges on Objects in Privilege Zone'
+        'T0WriteGPLink'                    = 'WriteGPLink Privileges on Tier Zero OU'
+        'T0WriteOwner'                     = 'WriteOwner Privileges on Objects in Privilege Zone'
+        'T0WriteOwnerLimitedRights'        = 'WriteOwner (Limited Rights) on Tier Zero Objects'
+        'T0WriteSPN'                       = 'WriteSPN Privileges on Tier Zero Account'
+        'T0ADCSESC1'                       = 'ADCS ESC1 Path to Tier Zero'
+        'T0ADCSESC3'                       = 'ADCS ESC3 Path to Tier Zero'
+        'T0ADCSESC4'                       = 'ADCS ESC4 Path to Tier Zero'
+        'T0ADCSESC6a'                      = 'ADCS ESC6a Path to Tier Zero'
+        'T0ADCSESC6b'                      = 'ADCS ESC6b Path to Tier Zero'
+        'T0ADCSESC9a'                      = 'ADCS ESC9a Path to Tier Zero'
+        'T0ADCSESC9b'                      = 'ADCS ESC9b Path to Tier Zero'
+        'T0ADCSESC10a'                     = 'ADCS ESC10a Path to Tier Zero'
+        'T0ADCSESC10b'                     = 'ADCS ESC10b Path to Tier Zero'
+        'T0ADCSESC13'                      = 'ADCS ESC13 Path to Tier Zero'
+    }
+
+    Write-Host ""
+    Write-Host "  -- Finding Summary ------------------------------------------" -ForegroundColor DarkCyan
+    Write-Host "  Fetches all active finding types for a domain, then retrieves" -ForegroundColor DarkGray
+    Write-Host "  the finding count for each one, sorted by count descending." -ForegroundColor DarkGray
+    Write-Host ""
+
+    $domainId = (Read-Host "  Enter domain_id (e.g. S-1-5-21-...)").Trim()
+    if ([string]::IsNullOrWhiteSpace($domainId)) { return }
+
+    $tagId = (Read-Host "  Enter asset_group_tag_id (default: 1  |  1=Tier Zero, 3=Tier One)").Trim()
+    if ([string]::IsNullOrWhiteSpace($tagId)) { $tagId = "1" }
+
+    # Step 1: Get active finding types
+    Write-Host ""
+    Write-Host "  [1/2] Fetching active finding types..." -ForegroundColor White
+    $typesResult = Invoke-BHERequest -BaseUrl $BaseUrl `
+        -Endpoint "/api/v2/domains/$domainId/available-types?asset_group_tag_id=$tagId" `
+        -TokenId $TokenId -TokenKey $TokenKey -Silent
+
+    if (-not $typesResult.Success) {
+        Write-Host "  [!] Failed to retrieve finding types." -ForegroundColor Red
+        return
+    }
+
+    $typesData = $typesResult.Data
+    if ($typesData.data) { $findingTypes = $typesData.data }
+    elseif ($typesData -is [System.Array]) { $findingTypes = $typesData }
+    else { $findingTypes = @() }
+
+    if ($findingTypes.Count -eq 0) {
+        Write-Host "  [!] No active finding types found for this domain/tag." -ForegroundColor Yellow
+        return
+    }
+
+    Write-Host "  [+] Found $($findingTypes.Count) active finding types" -ForegroundColor Green
+
+    # Hygiene-only findings — no attack path relationships, count via different response key
+    $hygieneFindings = @('T0MarkSensitive')
+
+    # Step 2: Fetch count + exposure/impact for each finding type
+    Write-Host "  [2/2] Fetching finding counts and exposure data..." -ForegroundColor White
+    Write-Host ""
+
+    $summaryObjects = @()
+    $counter = 0
+    foreach ($findingType in $findingTypes) {
+        $counter++
+        $displayName  = if ($friendlyNames.ContainsKey($findingType)) { $friendlyNames[$findingType] } else { $findingType }
+        $isHygiene    = $hygieneFindings -contains $findingType
+        $note         = if ($isHygiene) { "Hygiene check - no direct attack path" } else { "" }
+
+        Write-Host "  [$counter/$($findingTypes.Count)] $findingType" -ForegroundColor DarkGray -NoNewline
+
+        $detailsResult = Invoke-BHERequest -BaseUrl $BaseUrl `
+            -Endpoint "/api/v2/domains/$domainId/details?finding=$findingType&skip=0&limit=1000&sort_by=-exposure_percentage&sort_by=-exposure_count&sort_by=-impact_percentage&sort_by=-impact_count&asset_group_tag_id=$tagId&Accepted=eq%3Afalse" `
+            -TokenId $TokenId -TokenKey $TokenKey -Silent
+
+        $findingCount      = 0
+        $exposurePct       = ""
+        $impactPct         = ""
+        $criticalCount     = 0
+        $highCount         = 0
+
+        if ($detailsResult.Success) {
+            $detailsData = $detailsResult.Data
+
+            # Extract items array — try all known response envelope shapes
+            $items = $null
+            if ($detailsData.count -and $detailsData.count -gt 0) {
+                $findingCount = $detailsData.count
+            }
+            if ($detailsData.findings -is [System.Array]) {
+                $items = $detailsData.findings
+            } elseif ($detailsData.data -is [System.Array]) {
+                $items = $detailsData.data
+            } elseif ($detailsData -is [System.Array]) {
+                $items = $detailsData
+            }
+
+            if ($items -and $items.Count -gt 0) {
+                if ($findingCount -eq 0) { $findingCount = $items.Count }
+
+                # Pull exposure/impact from first item (sorted by -exposure_percentage)
+                $firstItem = $items[0]
+                if ($firstItem.exposure_percentage)  { $exposurePct   = "$([math]::Round($firstItem.exposure_percentage, 1))%" }
+                if ($firstItem.impact_percentage)    { $impactPct     = "$([math]::Round($firstItem.impact_percentage, 1))%" }
+
+                # Count Critical / High severity items if severity field present
+                foreach ($item in $items) {
+                    if ($item.severity -eq 'critical' -or $item.risk -eq 'critical') { $criticalCount++ }
+                    if ($item.severity -eq 'high'     -or $item.risk -eq 'high')     { $highCount++ }
+                }
+            }
+
+            # Hygiene findings: try the exposure_percentage from the finding_assets metadata
+            if ($isHygiene -and $detailsData.finding_assets) {
+                $fa = $detailsData.finding_assets
+                if ($fa.$findingType) {
+                    $faItem = $fa.$findingType
+                    if ($faItem.count) { $findingCount = $faItem.count }
+                }
+            }
+
+            Write-Host " - $findingCount findings" -ForegroundColor Green
+        } else {
+            Write-Host " - [failed]" -ForegroundColor Red
+        }
+
+        $summaryObjects += [PSCustomObject]@{
+            FindingType   = $findingType
+            DisplayName   = $displayName
+            Count         = $findingCount
+            ExposurePct   = $exposurePct
+            ImpactPct     = $impactPct
+            Critical      = if ($criticalCount -gt 0) { $criticalCount } else { "" }
+            High          = if ($highCount -gt 0)     { $highCount }     else { "" }
+            Note          = $note
+        }
+    }
+
+    # Sort by Count descending (matches UI order), hygiene items sorted separately at bottom
+    $attackPath = $summaryObjects | Where-Object { $_.Note -eq "" }    | Sort-Object { [int]$_.Count } -Descending
+    $hygiene    = $summaryObjects | Where-Object { $_.Note -ne "" }    | Sort-Object { [int]$_.Count } -Descending
+
+    $ranked = @()
+    $rank = 0
+    foreach ($item in ($attackPath + $hygiene)) {
+        $rank++
+        $ranked += [PSCustomObject]@{
+            '#'           = $rank
+            Count         = $item.Count
+            ExposurePct   = $item.ExposurePct
+            ImpactPct     = $item.ImpactPct
+            Critical      = $item.Critical
+            High          = $item.High
+            FindingType   = $item.FindingType
+            DisplayName   = $item.DisplayName
+            Note          = $item.Note
+        }
+    }
+
+    # Display
+    Write-Host ""
+    Write-Host "  -------------------------------------------------" -ForegroundColor DarkCyan
+    Write-Host "    Finding Summary: $domainId" -ForegroundColor Cyan
+    Write-Host "    Asset Group Tag ID: $tagId  |  Sorted by count descending" -ForegroundColor DarkGray
+    Write-Host "    * Hygiene findings shown at bottom - no direct attack path" -ForegroundColor DarkGray
+    Write-Host "  -------------------------------------------------" -ForegroundColor DarkCyan
+    Write-Host ""
+    $ranked | Format-Table -AutoSize | Out-String | Write-Host
+
+    Write-Host ""
+    $exportChoice = Read-Host "  Export to CSV? (enter file path or press Enter to skip)"
+    if (-not [string]::IsNullOrWhiteSpace($exportChoice)) {
+        Export-Results -Objects $ranked -Path $exportChoice
+    }
+
+    Write-Host ""
+    Write-Host "  Press Enter to return to library..." -ForegroundColor DarkGray
+    Read-Host | Out-Null
+}
+
 function Show-APILibrary {
     param(
         [array]$Library,
@@ -1554,6 +1787,12 @@ function Show-APILibrary {
         if ([int]::TryParse($pick, [ref]$pickNum) -and $queryMap.ContainsKey($pickNum)) {
             $selected = $queryMap[$pickNum]
             $endpoint = $selected.Endpoint
+
+            # Special handler - Finding Summary chained call
+            if ($endpoint -eq 'SPECIAL:FindingSummary') {
+                Invoke-FindingSummary -BaseUrl $BaseUrl -TokenId $TokenId -TokenKey $TokenKey
+                continue
+            }
 
             # Check for {param} placeholders and prompt
             $paramMatches = [regex]::Matches($endpoint, '\{([^}]+)\}')
