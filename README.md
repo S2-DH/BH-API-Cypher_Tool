@@ -103,15 +103,25 @@ Debug output is suppressed by default for clean operation.
 
 ## API GET Queries
 
-162 pre-built GET endpoints across 37 categories from the [BHE API Reference](https://bloodhound.specterops.io/reference/overview). Endpoints with `{param}` placeholders prompt for input at runtime.
+167 pre-built GET endpoints across 37 categories from the [BHE API Reference](https://bloodhound.specterops.io/reference/overview). Endpoints with `{param}` placeholders prompt for input at runtime.
+
+<img width="1279" height="1173" alt="image" src="https://github.com/user-attachments/assets/9fe20e79-1e43-4324-adf6-f64d8313b79d" />
+<img width="1015" height="1293" alt="image" src="https://github.com/user-attachments/assets/d49136a0-fbaf-4b06-8617-a03eee209fb2" />
+<img width="1509" height="1159" alt="image" src="https://github.com/user-attachments/assets/c450a778-c906-4842-bc5c-84b39167134a" />
+<img width="1245" height="1057" alt="image" src="https://github.com/user-attachments/assets/f94006bd-0554-4375-9431-682ccf85e735" />
 
 ---
 
 ## Cypher Queries
 
-49 pre-built Cypher queries sourced from the [SpecterOps Query Library](https://queries.specterops.io/) across 10 categories: Tier Zero, Shortest Paths, Dangerous Privileges, AD Hygiene, ADCS, NTLM Relay, Cross Platform, Domain Info, and Azure.
+68 pre-built Cypher queries sourced from the [SpecterOps Query Library](https://queries.specterops.io/) across 10 categories: Tier Zero, Shortest Paths, Dangerous Privileges, AD Hygiene, ADCS, NTLM Relay, Cross Platform, Domain Info, and Azure.
 
 All queries use `RETURN n` or `RETURN p` patterns compatible with BHE's graph API endpoint.
+
+<img width="898" height="995" alt="image" src="https://github.com/user-attachments/assets/1943bedd-474b-48a5-b449-77579edd3a30" />
+<img width="925" height="724" alt="image" src="https://github.com/user-attachments/assets/85ceaa23-e3d5-481b-976a-9120b8c20455" />
+
+
 
 ### Test Queries
 
